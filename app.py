@@ -26,7 +26,6 @@ from deepgram import (
     DeepgramClient,
     DeepgramClientOptions,
     AgentWebSocketEvents,
-    SettingsConfigurationOptions,
 )
 
 # Load environment variables from .env file
@@ -411,32 +410,44 @@ class VoiceAgent:
             # Set up event handlers
             self.setup_event_handlers()
             
-            # Configure agent settings
-            options = SettingsConfigurationOptions()
-            options.audio.input.encoding = "linear16"
-            options.audio.input.sample_rate = USER_AUDIO_SAMPLE_RATE
-            options.audio.output.encoding = "linear16"
-            options.audio.output.sample_rate = AGENT_AUDIO_SAMPLE_RATE
-            options.audio.output.container = "none"
+            # Create settings as a dictionary instead of using SettingsConfigurationOptions
+            settings = {
+                "type": "SettingsConfiguration",
+                "audio": {
+                    "input": {
+                        "encoding": "linear16",
+                        "sample_rate": USER_AUDIO_SAMPLE_RATE,
+                    },
+                    "output": {
+                        "encoding": "linear16",
+                        "sample_rate": AGENT_AUDIO_SAMPLE_RATE,
+                        "container": "none",
+                    },
+                },
+                "agent": {
+                    "listen": {"model": "nova-2"},
+                    "think": {
+                        "provider": {"type": "open_ai"},
+                        "model": "gpt-4o-mini",
+                        "instructions": formatted_prompt,
+                        "functions": FUNCTION_DEFINITIONS,
+                    },
+                    "speak": {"model": VOICE},
+                },
+                "context": {
+                    "messages": [
+                        {
+                            "role": "assistant",
+                            "content": "Hello! I'm your appointment scheduling assistant. How can I help you today?",
+                        }
+                    ],
+                    "replay": True,
+                },
+            }
             
-            options.agent.listen.model = "nova-2"
-            options.agent.think.provider.type = "open_ai"
-            options.agent.think.model = "gpt-4o-mini"
-            options.agent.think.instructions = formatted_prompt
-            options.agent.think.functions = FUNCTION_DEFINITIONS
-            options.agent.speak.model = VOICE
-            
-            options.context.messages = [
-                {
-                    "role": "assistant",
-                    "content": "Hello! I'm your appointment scheduling assistant. How can I help you today?",
-                }
-            ]
-            options.context.replay = True
-            
-            # Start the connection
+            # Start the connection with the settings dictionary
             logger.info("Starting Deepgram connection...")
-            if self.dg_connection.start(options) is False:
+            if not self.dg_connection.start(settings):
                 logger.error("Failed to start Deepgram connection")
                 return False
                 
