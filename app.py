@@ -398,18 +398,6 @@ FUNCTION_DEFINITIONS = [
 SETTINGS["agent"]["think"]["functions"] = FUNCTION_DEFINITIONS
 
 
-# Custom WebSocket class to handle headers
-class HeaderWebSocketClientProtocol(websockets.WebSocketClientProtocol):
-    def __init__(self, *args, **kwargs):
-        self.custom_headers = kwargs.pop('custom_headers', {})
-        super().__init__(*args, **kwargs)
-
-    async def handshake(self, *args, **kwargs):
-        # Add custom headers to the handshake
-        kwargs['extra_headers'] = self.custom_headers
-        return await super().handshake(*args, **kwargs)
-
-
 # Voice Agent class
 class VoiceAgent:
     def __init__(self):
@@ -443,18 +431,36 @@ class VoiceAgent:
         settings["agent"]["think"]["instructions"] = formatted_prompt
 
         try:
-            # Try a simpler approach without extra_headers
+            # Connect to Deepgram Voice Agent API
             logger.info("Connecting to Deepgram Voice Agent API...")
             
-            # Use URI with token in the URL instead of headers
-            uri = f"{VOICE_AGENT_URL}?auth_token={dg_api_key}"
-            self.ws = await websockets.connect(uri)
+            # Create connection with proper headers according to documentation
+            headers = {"Authorization": f"Token {dg_api_key}"}
+            
+            # Use websockets.connect with headers
+            self.ws = await websockets.connect(
+                VOICE_AGENT_URL,
+                extra_headers=headers
+            )
             
             logger.info("Connected to Deepgram Voice Agent API")
+            
+            # Send settings configuration
+            logger.info("Sending SettingsConfiguration...")
             await self.ws.send(json.dumps(settings))
+            
+            # Wait for settings applied confirmation
+            response = await self.ws.recv()
+            response_json = json.loads(response)
+            if response_json.get("type") == "SettingsApplied":
+                logger.info("Settings applied successfully")
+            
             return True
         except Exception as e:
             logger.error(f"Failed to connect to Deepgram: {e}")
+            # Print more detailed error information
+            import traceback
+            logger.error(traceback.format_exc())
             return False
 
     def audio_callback(self, input_data, frame_count, time_info, status_flag):
