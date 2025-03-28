@@ -20,13 +20,7 @@ import secrets
 from functools import wraps
 from dotenv import load_dotenv
 import sys
-
-# Import Deepgram SDK
-from deepgram import (
-    DeepgramClient,
-    DeepgramClientOptions,
-    AgentWebSocketEvents,
-)
+import websockets
 
 # Load environment variables from .env file
 load_dotenv()
@@ -45,6 +39,9 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 
 # Google Calendar API scopes
 SCOPES = ['https://www.googleapis.com/auth/calendar']
+
+# Deepgram Voice Agent URL
+VOICE_AGENT_URL = "wss://agent.deepgram.com/agent"
 
 # Audio settings
 USER_AUDIO_SAMPLE_RATE = 48000
@@ -368,8 +365,7 @@ class VoiceAgent:
     def __init__(self):
         self.mic_audio_queue = asyncio.Queue()
         self.speaker = None
-        self.dg_client = None
-        self.dg_connection = None
+        self.ws = None
         self.is_running = False
         self.loop = None
         self.audio = None
@@ -393,24 +389,7 @@ class VoiceAgent:
             current_date = datetime.now().strftime("%A, %B %d, %Y")
             formatted_prompt = PROMPT_TEMPLATE.format(current_date=current_date)
             
-            # Set up Deepgram client
-            logger.info("Setting up Deepgram client...")
-            config = DeepgramClientOptions(
-                options={
-                    "keepalive": "true",
-                    "microphone_record": "false",  # We'll handle the microphone ourselves
-                    "speaker_playback": "false",   # We'll handle audio playback ourselves
-                }
-            )
-            self.dg_client = DeepgramClient(api_key=dg_api_key, config=config)
-            
-            # Create a websocket connection to Deepgram
-            self.dg_connection = self.dg_client.agent.websocket.v("1")
-            
-            # Set up event handlers
-            self.setup_event_handlers()
-            
-            # Create settings as a dictionary instead of using SettingsConfigurationOptions
+            # Create settings dictionary
             settings = {
                 "type": "SettingsConfiguration",
                 "audio": {
@@ -445,11 +424,21 @@ class VoiceAgent:
                 },
             }
             
-            # Start the connection with the settings dictionary
-            logger.info("Starting Deepgram connection...")
-            if not self.dg_connection.start(settings):
-                logger.error("Failed to start Deepgram connection")
-                return False
+            # Connect to Deepgram using websockets directly
+            logger.info("Connecting to Deepgram Voice Agent API...")
+            headers = {"Authorization": f"Token {dg_api_key}"}
+            self.ws = await websockets.connect(VOICE_AGENT_URL, extra_headers=headers)
+            
+            # Send settings
+            await self.ws.send(json.dumps(settings))
+            
+            # Wait for settings applied confirmation
+            response = await self.ws.recv()
+            response_json = json.loads(response)
+            if response_json.get("type") == "SettingsApplied":
+                logger.info("Settings applied successfully")
+            else:
+                logger.info(f"Received response: {response_json}")
                 
             logger.info("Deepgram connection established successfully")
             return True
@@ -459,72 +448,6 @@ class VoiceAgent:
             import traceback
             logger.error(traceback.format_exc())
             return False
-
-    def setup_event_handlers(self):
-        """Set up event handlers for Deepgram websocket events"""
-        
-        def on_open(self, open, **kwargs):
-            logger.info(f"Deepgram connection opened: {open}")
-            
-        def on_welcome(self, welcome, **kwargs):
-            logger.info(f"Received welcome message: {welcome}")
-            
-        def on_settings_applied(self, settings_applied, **kwargs):
-            logger.info(f"Settings applied: {settings_applied}")
-            
-        def on_conversation_text(self, conversation_text, **kwargs):
-            logger.info(f"Conversation text: {conversation_text}")
-            # Emit the conversation text to the client
-            socketio.emit("conversation_update", conversation_text)
-            
-        def on_user_started_speaking(self, user_started_speaking, **kwargs):
-            logger.info(f"User started speaking: {user_started_speaking}")
-            if self.speaker:
-                self.speaker.stop()
-                
-        def on_function_call_request(self, function_call_request, **kwargs):
-            logger.info(f"Function call request: {function_call_request}")
-            
-            # Extract function call details
-            function_name = function_call_request.get("function_name")
-            function_call_id = function_call_request.get("function_call_id")
-            parameters = function_call_request.get("input", {})
-            
-            # Handle the function call asynchronously
-            asyncio.run_coroutine_threadsafe(
-                self.handle_function_call(function_name, function_call_id, parameters),
-                self.loop
-            )
-            
-        def on_binary_data(self, data, **kwargs):
-            # Handle audio data from Deepgram
-            if self.speaker:
-                asyncio.run_coroutine_threadsafe(
-                    self.speaker.play(data),
-                    self.loop
-                )
-                
-            # Convert audio to base64 and emit to client
-            audio_b64 = base64.b64encode(data).decode('utf-8')
-            socketio.emit("audio_chunk", {"audio": audio_b64})
-            
-        def on_close(self, close, **kwargs):
-            logger.info(f"Connection closed: {close}")
-            self.is_running = False
-            
-        def on_error(self, error, **kwargs):
-            logger.error(f"Error from Deepgram: {error}")
-            
-        # Register event handlers
-        self.dg_connection.on(AgentWebSocketEvents.Open, on_open)
-        self.dg_connection.on(AgentWebSocketEvents.Welcome, on_welcome)
-        self.dg_connection.on(AgentWebSocketEvents.SettingsApplied, on_settings_applied)
-        self.dg_connection.on(AgentWebSocketEvents.ConversationText, on_conversation_text)
-        self.dg_connection.on(AgentWebSocketEvents.UserStartedSpeaking, on_user_started_speaking)
-        self.dg_connection.on(AgentWebSocketEvents.FunctionCallRequest, on_function_call_request)
-        self.dg_connection.on(AgentWebSocketEvents.AudioData, on_binary_data)
-        self.dg_connection.on(AgentWebSocketEvents.Close, on_close)
-        self.dg_connection.on(AgentWebSocketEvents.Error, on_error)
 
     def audio_callback(self, input_data, frame_count, time_info, status_flag):
         if self.is_running and self.loop and not self.loop.is_closed():
@@ -597,9 +520,9 @@ class VoiceAgent:
             except Exception as e:
                 logger.error(f"Error terminating audio: {e}")
                 
-        if self.dg_connection:
+        if self.ws:
             try:
-                self.dg_connection.finish()
+                asyncio.run_coroutine_threadsafe(self.ws.close(), self.loop)
             except Exception as e:
                 logger.error(f"Error closing Deepgram connection: {e}")
 
@@ -607,8 +530,8 @@ class VoiceAgent:
         try:
             while self.is_running:
                 data = await self.mic_audio_queue.get()
-                if self.dg_connection and data:
-                    self.dg_connection.send_audio(data)
+                if self.ws and data:
+                    await self.ws.send(data)
         except Exception as e:
             logger.error(f"Error in sender: {e}")
 
@@ -691,9 +614,53 @@ class VoiceAgent:
             "output": json.dumps(result)
         }
         
-        self.dg_connection.send_json(response)
+        await self.ws.send(json.dumps(response))
         logger.info(f"Function response sent: {json.dumps(result)}")
         return result
+
+    async def receiver(self):
+        try:
+            self.speaker = Speaker()
+            
+            with self.speaker:
+                async for message in self.ws:
+                    if isinstance(message, str):
+                        logger.info(f"Server: {message}")
+                        message_json = json.loads(message)
+                        message_type = message_json.get("type")
+                        
+                        if message_type == "UserStartedSpeaking":
+                            self.speaker.stop()
+                        elif message_type == "ConversationText":
+                            # Emit the conversation text to the client
+                            socketio.emit("conversation_update", message_json)
+                            
+                        elif message_type == "FunctionCallRequest":
+                            function_name = message_json.get("function_name")
+                            function_call_id = message_json.get("function_call_id")
+                            parameters = message_json.get("input", {})
+                            
+                            # Handle the function call
+                            await self.handle_function_call(function_name, function_call_id, parameters)
+                            
+                        elif message_type == "Welcome":
+                            logger.info(f"Connected with session ID: {message_json.get('session_id')}")
+                            
+                        elif message_type == "CloseConnection":
+                            logger.info("Closing connection...")
+                            await self.ws.close()
+                            break
+                            
+                    elif isinstance(message, bytes):
+                        # Convert audio to base64 and emit to client
+                        audio_b64 = base64.b64encode(message).decode('utf-8')
+                        socketio.emit("audio_chunk", {"audio": audio_b64})
+                        
+                        # Also play through speaker
+                        await self.speaker.play(message)
+
+        except Exception as e:
+            logger.error(f"Error in receiver: {e}")
 
     async def run(self):
         if not await self.setup():
@@ -701,11 +668,11 @@ class VoiceAgent:
 
         self.is_running = True
         try:
-            self.speaker = Speaker()
-            with self.speaker:
-                stream, audio = await self.start_microphone()
-                # Just run the sender task - the receiver is handled by event handlers
-                await self.sender()
+            stream, audio = await self.start_microphone()
+            await asyncio.gather(
+                self.sender(),
+                self.receiver(),
+            )
         except Exception as e:
             logger.error(f"Error in run: {e}")
         finally:
@@ -876,7 +843,7 @@ def handle_stop_voice_agent():
 def handle_send_text(data):
     """Handle text input from the user"""
     text = data.get("text", "")
-    if text and voice_agent and voice_agent.dg_connection:
+    if text and voice_agent and voice_agent.ws:
         try:
             # Create a message to inject user text
             message = {
@@ -884,7 +851,10 @@ def handle_send_text(data):
                 "message": text
             }
             # Send the message
-            voice_agent.dg_connection.send_json(message)
+            asyncio.run_coroutine_threadsafe(
+                voice_agent.ws.send(json.dumps(message)),
+                voice_agent.loop
+            )
         except Exception as e:
             logger.error(f"Error sending text: {e}")
 
