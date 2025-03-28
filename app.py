@@ -21,6 +21,7 @@ from functools import wraps
 from dotenv import load_dotenv
 import sys
 import websockets
+import traceback
 
 # Load environment variables from .env file
 load_dotenv()
@@ -231,38 +232,64 @@ class GoogleCalendarScheduler:
     
     def authenticate(self):
         """Authenticate with Google Calendar API"""
-        creds = None
-        
-        # Load existing token if available
-        if os.path.exists(self.token_file):
-            with open(self.token_file, 'rb') as token:
-                creds = pickle.load(token)
-        
-        # Refresh token if expired
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        # Otherwise, get new credentials
-        elif not creds:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                self.credentials_file, SCOPES)
-            creds = flow.run_local_server(port=0)
+        try:
+            logger.info(f"Authenticating with Google Calendar API")
+            logger.info(f"Credentials file: {self.credentials_file}, exists: {os.path.exists(self.credentials_file)}")
+            logger.info(f"Token file: {self.token_file}, exists: {os.path.exists(self.token_file)}")
             
-            # Save credentials for future use
-            with open(self.token_file, 'wb') as token:
-                pickle.dump(creds, token)
-        
-        # Build the service
-        self.service = build('calendar', 'v3', credentials=creds)
-        return self.service is not None
+            creds = None
+            
+            # Load existing token if available
+            if os.path.exists(self.token_file):
+                logger.info("Loading existing token")
+                with open(self.token_file, 'rb') as token:
+                    creds = pickle.load(token)
+                logger.info(f"Token loaded, expired: {creds.expired if creds else 'N/A'}")
+            
+            # Refresh token if expired
+            if creds and creds.expired and creds.refresh_token:
+                logger.info("Refreshing expired token")
+                creds.refresh(Request())
+                logger.info("Token refreshed")
+            # Otherwise, get new credentials
+            elif not creds:
+                logger.info("No token found, getting new credentials")
+                if not os.path.exists(self.credentials_file):
+                    logger.error(f"Credentials file not found: {self.credentials_file}")
+                    return False
+                    
+                flow = InstalledAppFlow.from_client_secrets_file(
+                    self.credentials_file, SCOPES)
+                creds = flow.run_local_server(port=0)
+                logger.info("New credentials obtained")
+                
+                # Save credentials for future use
+                with open(self.token_file, 'wb') as token:
+                    pickle.dump(creds, token)
+                logger.info("New token saved")
+            
+            # Build the service
+            self.service = build('calendar', 'v3', credentials=creds)
+            logger.info("Google Calendar service built successfully")
+            return True
+        except Exception as e:
+            logger.error(f"Error authenticating with Google Calendar: {e}")
+            logger.error(traceback.format_exc())
+            return False
     
     async def get_available_slots(self, start_date, end_date=None, calendar_id='primary'):
         """Get available appointment slots"""
+        logger.info(f"Getting available slots from {start_date} to {end_date or 'week later'}")
+        
         if not self.service:
+            logger.info("No service, authenticating")
             if not self.authenticate():
+                logger.error("Failed to authenticate with Google Calendar")
                 return {"error": "Failed to authenticate with Google Calendar"}
         
         if not end_date:
             end_date = (datetime.fromisoformat(start_date) + timedelta(days=7)).isoformat()
+            logger.info(f"End date not provided, using {end_date}")
         
         # Get busy times from calendar
         body = {
@@ -272,8 +299,10 @@ class GoogleCalendarScheduler:
         }
         
         try:
+            logger.info(f"Querying freebusy with body: {body}")
             events_result = self.service.freebusy().query(body=body).execute()
             busy_times = events_result['calendars'][calendar_id]['busy']
+            logger.info(f"Found {len(busy_times)} busy times")
             
             # Generate all possible slots (9 AM to 5 PM, 1-hour slots)
             all_slots = []
@@ -285,6 +314,8 @@ class GoogleCalendarScheduler:
                     slot_time = current.isoformat()
                     all_slots.append(slot_time)
                 current += timedelta(hours=1)
+            
+            logger.info(f"Generated {len(all_slots)} possible slots")
             
             # Filter out busy slots
             available_slots = []
@@ -305,19 +336,26 @@ class GoogleCalendarScheduler:
                 if is_available:
                     available_slots.append(slot)
             
+            logger.info(f"Found {len(available_slots)} available slots")
             return {"available_slots": available_slots}
             
         except Exception as e:
             logger.error(f"Error getting available slots: {e}")
+            logger.error(traceback.format_exc())
             return {"error": f"Failed to get available slots: {str(e)}"}
     
     async def schedule_appointment(self, customer_data, calendar_id='primary'):
         """Schedule an appointment in Google Calendar"""
+        logger.info(f"Scheduling appointment for {customer_data.name}")
+        
         if not self.service:
+            logger.info("No service, authenticating")
             if not self.authenticate():
+                logger.error("Failed to authenticate with Google Calendar")
                 return {"error": "Failed to authenticate with Google Calendar"}
         
         if not customer_data.is_valid_for_appointment():
+            logger.error("Incomplete customer data for appointment")
             return {"error": "Incomplete customer data for appointment"}
         
         # Create event
@@ -345,6 +383,7 @@ class GoogleCalendarScheduler:
         }
         
         try:
+            logger.info(f"Creating event: {event}")
             event = self.service.events().insert(calendarId=calendar_id, body=event, sendUpdates='all').execute()
             logger.info(f"Event created: {event.get('htmlLink')}")
             
@@ -357,6 +396,7 @@ class GoogleCalendarScheduler:
             
         except Exception as e:
             logger.error(f"Error scheduling appointment: {e}")
+            logger.error(traceback.format_exc())
             return {"error": f"Failed to schedule appointment: {str(e)}"}
 
 
@@ -445,7 +485,6 @@ class VoiceAgent:
             
         except Exception as e:
             logger.error(f"Failed to connect to Deepgram: {e}")
-            import traceback
             logger.error(traceback.format_exc())
             return False
 
@@ -562,6 +601,24 @@ class VoiceAgent:
                 start_date = parameters.get("start_date")
                 end_date = parameters.get("end_date")
                 
+                # Parse the date if it's not in ISO format
+                try:
+                    # Try to parse as ISO format
+                    datetime.fromisoformat(start_date)
+                except (ValueError, TypeError):
+                    # If not ISO format or None, use current date
+                    logger.info(f"Invalid start_date format: {start_date}, using current date")
+                    start_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+                
+                if end_date:
+                    try:
+                        # Try to parse as ISO format
+                        datetime.fromisoformat(end_date)
+                    except ValueError:
+                        # If not ISO format, use start_date + 7 days
+                        logger.info(f"Invalid end_date format: {end_date}, using start_date + 7 days")
+                        end_date = (datetime.fromisoformat(start_date) + timedelta(days=7)).isoformat()
+                
                 slots_result = await self.calendar_scheduler.get_available_slots(start_date, end_date)
                 result = slots_result
                 
@@ -604,7 +661,8 @@ class VoiceAgent:
                 result = {"error": f"Unknown function: {function_name}"}
                 
         except Exception as e:
-            logger.error(f"Error executing function: {str(e)}")
+            logger.error(f"Error executing function: {e}")
+            logger.error(traceback.format_exc())
             result = {"error": str(e)}
         
         # Send the function call response
@@ -614,8 +672,9 @@ class VoiceAgent:
             "output": json.dumps(result)
         }
         
+        logger.info(f"Sending function response: {json.dumps(response)}")
         await self.ws.send(json.dumps(response))
-        logger.info(f"Function response sent: {json.dumps(result)}")
+        logger.info(f"Function response sent")
         return result
 
     async def receiver(self):
@@ -661,6 +720,7 @@ class VoiceAgent:
 
         except Exception as e:
             logger.error(f"Error in receiver: {e}")
+            logger.error(traceback.format_exc())
 
     async def run(self):
         if not await self.setup():
@@ -675,6 +735,7 @@ class VoiceAgent:
             )
         except Exception as e:
             logger.error(f"Error in run: {e}")
+            logger.error(traceback.format_exc())
         finally:
             self.is_running = False
             self.cleanup()
@@ -753,6 +814,7 @@ def run_async_voice_agent():
             logger.info("Voice agent task was cancelled")
         except Exception as e:
             logger.error(f"Error in voice agent thread: {e}")
+            logger.error(traceback.format_exc())
         finally:
             # Clean up the loop
             try:
@@ -772,6 +834,7 @@ def run_async_voice_agent():
                 loop.close()
     except Exception as e:
         logger.error(f"Error in voice agent thread setup: {e}")
+        logger.error(traceback.format_exc())
 
 
 # Flask routes
@@ -809,6 +872,7 @@ def get_audio_devices():
         })
     except Exception as e:
         logger.error(f"Error getting audio devices: {e}")
+        logger.error(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
 
@@ -836,6 +900,7 @@ def handle_stop_voice_agent():
                     task.cancel()
             except Exception as e:
                 logger.error(f"Error stopping voice agent: {e}")
+                logger.error(traceback.format_exc())
         voice_agent = None
 
 
@@ -857,6 +922,7 @@ def handle_send_text(data):
             )
         except Exception as e:
             logger.error(f"Error sending text: {e}")
+            logger.error(traceback.format_exc())
 
 
 if __name__ == "__main__":
@@ -873,6 +939,18 @@ if __name__ == "__main__":
     else:
         print("\n" + "=" * 60)
         print(f"Using Deepgram API key: {os.environ.get('DEEPGRAM_API_KEY')[:5]}...")
+        print("=" * 60 + "\n")
+    
+    # Check if credentials.json exists
+    if not os.path.exists('credentials.json'):
+        print("\n" + "=" * 60)
+        print("⚠️  WARNING: credentials.json file not found!")
+        print("Google Calendar integration will not work without this file.")
+        print("Please make sure the file exists in the project directory.")
+        print("=" * 60 + "\n")
+    else:
+        print("\n" + "=" * 60)
+        print(f"Found credentials.json file")
         print("=" * 60 + "\n")
     
     print("\n" + "=" * 60)
