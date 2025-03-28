@@ -20,6 +20,7 @@ import pickle
 import secrets
 from functools import wraps
 from dotenv import load_dotenv
+import sys
 
 # Load environment variables from .env file
 load_dotenv()
@@ -397,6 +398,18 @@ FUNCTION_DEFINITIONS = [
 SETTINGS["agent"]["think"]["functions"] = FUNCTION_DEFINITIONS
 
 
+# Custom WebSocket class to handle headers
+class HeaderWebSocketClientProtocol(websockets.WebSocketClientProtocol):
+    def __init__(self, *args, **kwargs):
+        self.custom_headers = kwargs.pop('custom_headers', {})
+        super().__init__(*args, **kwargs)
+
+    async def handshake(self, *args, **kwargs):
+        # Add custom headers to the handshake
+        kwargs['extra_headers'] = self.custom_headers
+        return await super().handshake(*args, **kwargs)
+
+
 # Voice Agent class
 class VoiceAgent:
     def __init__(self):
@@ -430,11 +443,14 @@ class VoiceAgent:
         settings["agent"]["think"]["instructions"] = formatted_prompt
 
         try:
-            # Create headers dictionary
-            headers = {"Authorization": f"Token {dg_api_key}"}
+            # Try a simpler approach without extra_headers
+            logger.info("Connecting to Deepgram Voice Agent API...")
             
-            # Connect to Deepgram with headers
-            self.ws = await websockets.connect(VOICE_AGENT_URL, extra_headers=headers)
+            # Use URI with token in the URL instead of headers
+            uri = f"{VOICE_AGENT_URL}?auth_token={dg_api_key}"
+            self.ws = await websockets.connect(uri)
+            
+            logger.info("Connected to Deepgram Voice Agent API")
             await self.ws.send(json.dumps(settings))
             return True
         except Exception as e:
@@ -848,6 +864,10 @@ def handle_send_text(data):
 
 
 if __name__ == "__main__":
+    # Print Python and package versions for debugging
+    print(f"Python version: {sys.version}")
+    print(f"Websockets version: {websockets.__version__}")
+    
     # Check if Deepgram API key is set
     if not os.environ.get("DEEPGRAM_API_KEY"):
         print("\n" + "=" * 60)
