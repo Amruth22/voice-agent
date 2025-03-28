@@ -4,16 +4,25 @@ This repository contains a voice agent application that collects customer detail
 
 ## Features
 
-- Customer data collection through console interface
+- Web interface for customer interaction
+- Voice recognition for hands-free operation
+- Text input option for typing instead of speaking
 - Google Calendar integration for appointment scheduling
 - Available time slot checking
 - Appointment confirmation and email notifications
+- Real-time conversation display
+- Audio playback of agent responses
+
+## Screenshots
+
+![Voice Agent Web Interface](https://via.placeholder.com/800x450.png?text=Voice+Agent+Web+Interface)
 
 ## Requirements
 
 - Python 3.7+
 - Google Cloud Platform account with Calendar API enabled
 - OAuth 2.0 credentials for Google Calendar API
+- Deepgram API key for voice agent functionality
 
 ## Setup
 
@@ -25,7 +34,7 @@ This repository contains a voice agent application that collects customer detail
 
 2. Install required packages:
    ```
-   pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib
+   pip install -r requirements.txt
    ```
 
 3. Set up Google Calendar API:
@@ -35,9 +44,35 @@ This repository contains a voice agent application that collects customer detail
    - Create OAuth 2.0 credentials (Desktop application)
    - Download the credentials JSON file and save it as `credentials.json` in the project directory
 
+4. Set up Deepgram API:
+   - Sign up for a [Deepgram account](https://console.deepgram.com/signup)
+   - Create a new API key with Nova ASR and Voice Agent capabilities
+   - Set the API key as an environment variable:
+     ```
+     export DEEPGRAM_API_KEY=your_api_key_here
+     ```
+
 ## Usage
 
-Run the script to start the appointment scheduler:
+### Web Interface
+
+Run the Flask application to start the web interface:
+
+```
+python app.py
+```
+
+Then open your browser to http://127.0.0.1:5000 to access the web interface.
+
+1. Select your microphone and speaker devices from the dropdown menus
+2. Click "Start Voice Agent" to begin
+3. Speak to the agent or type in the text box
+4. The agent will guide you through scheduling an appointment
+5. Once complete, you'll see the appointment details and receive an email confirmation
+
+### Console Interface
+
+Alternatively, you can use the console interface:
 
 ```
 python google_calendar_scheduler.py
@@ -51,14 +86,24 @@ The script will:
 
 ## Authentication
 
-On first run, the script will open a browser window asking you to authorize the application to access your Google Calendar. After authorization, a token will be saved locally for future use.
+On first run, the application will open a browser window asking you to authorize it to access your Google Calendar. After authorization, a token will be saved locally for future use.
+
+## Project Structure
+
+- `app.py` - Flask web application with SocketIO for real-time communication
+- `google_calendar_scheduler.py` - Console-based appointment scheduler
+- `templates/` - HTML templates for the web interface
+- `static/` - CSS, JavaScript, and other static assets
+- `credentials.json` - Google OAuth credentials (you need to provide this)
+- `token.pickle` - Saved authentication token (generated on first run)
 
 ## Future Enhancements
 
-- Web interface for customer data collection
-- Voice recognition for hands-free operation
 - SMS notifications for appointment reminders
 - Integration with CRM systems
+- Multi-language support
+- Calendar sharing options
+- Recurring appointment scheduling
 
 ## License
 
