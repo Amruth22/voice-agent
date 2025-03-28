@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, session
+from flask import Flask, render_template, request, jsonify, session, copy_current_request_context
 from flask_socketio import SocketIO
 import os
 import asyncio
@@ -221,6 +221,17 @@ class CustomerData:
         return customer
 
 
+# Helper function to ensure RFC3339 format for dates
+def ensure_rfc3339_format(date_string):
+    """Ensure the date string is in RFC3339 format with timezone"""
+    # If already has timezone info (Z or +/-), return as is
+    if date_string.endswith('Z') or '+' in date_string[10:] or '-' in date_string[10:]:
+        return date_string
+    
+    # Otherwise, add 'Z' for UTC
+    return date_string + 'Z'
+
+
 # Google Calendar Scheduler
 class GoogleCalendarScheduler:
     """Class to handle Google Calendar operations"""
@@ -300,10 +311,16 @@ class GoogleCalendarScheduler:
             end_date = (datetime.fromisoformat(start_date) + timedelta(days=7)).isoformat()
             logger.info(f"End date not provided, using {end_date}")
         
+        # Ensure dates are in RFC3339 format with timezone
+        start_date_rfc = ensure_rfc3339_format(start_date)
+        end_date_rfc = ensure_rfc3339_format(end_date)
+        
+        logger.info(f"Using RFC3339 dates: {start_date_rfc} to {end_date_rfc}")
+        
         # Get busy times from calendar
         body = {
-            "timeMin": start_date,
-            "timeMax": end_date,
+            "timeMin": start_date_rfc,
+            "timeMax": end_date_rfc,
             "items": [{"id": calendar_id}]
         }
         
@@ -315,13 +332,15 @@ class GoogleCalendarScheduler:
             
             # Generate all possible slots (9 AM to 5 PM, 1-hour slots)
             all_slots = []
-            current = datetime.fromisoformat(start_date)
-            end = datetime.fromisoformat(end_date)
+            current = datetime.fromisoformat(start_date.replace('Z', '+00:00') if start_date.endswith('Z') else start_date)
+            end = datetime.fromisoformat(end_date.replace('Z', '+00:00') if end_date.endswith('Z') else end_date)
             
             while current <= end:
                 if current.hour >= 9 and current.hour < 17:
-                    slot_time = current.isoformat()
-                    all_slots.append(slot_time)
+                    # Skip weekends
+                    if current.weekday() < 5:  # 0-4 are Monday to Friday
+                        slot_time = current.isoformat()
+                        all_slots.append(slot_time)
                 current += timedelta(hours=1)
             
             logger.info(f"Generated {len(all_slots)} possible slots")
@@ -367,16 +386,25 @@ class GoogleCalendarScheduler:
             logger.error("Incomplete customer data for appointment")
             return {"error": "Incomplete customer data for appointment"}
         
+        # Ensure appointment time is in RFC3339 format
+        appointment_time_rfc = ensure_rfc3339_format(customer_data.appointment_time)
+        appointment_end_time_rfc = ensure_rfc3339_format(
+            (datetime.fromisoformat(customer_data.appointment_time.replace('Z', '+00:00') 
+                                   if customer_data.appointment_time.endswith('Z') 
+                                   else customer_data.appointment_time) 
+             + timedelta(hours=1)).isoformat()
+        )
+        
         # Create event
         event = {
             'summary': f"{customer_data.appointment_type} with {customer_data.name}",
             'description': f"Phone: {customer_data.phone or 'N/A'}",
             'start': {
-                'dateTime': customer_data.appointment_time,
+                'dateTime': appointment_time_rfc,
                 'timeZone': 'America/New_York',  # Adjust timezone as needed
             },
             'end': {
-                'dateTime': (datetime.fromisoformat(customer_data.appointment_time) + timedelta(hours=1)).isoformat(),
+                'dateTime': appointment_end_time_rfc,
                 'timeZone': 'America/New_York',  # Adjust timezone as needed
             },
             'attendees': [
@@ -425,8 +453,8 @@ class MockCalendarScheduler:
         
         # Generate available slots (9 AM to 5 PM, 1-hour slots)
         available_slots = []
-        current = datetime.fromisoformat(start_date)
-        end = datetime.fromisoformat(end_date)
+        current = datetime.fromisoformat(start_date.replace('Z', '+00:00') if start_date.endswith('Z') else start_date)
+        end = datetime.fromisoformat(end_date.replace('Z', '+00:00') if end_date.endswith('Z') else end_date)
         
         while current <= end:
             if current.hour >= 9 and current.hour < 17:
@@ -452,7 +480,10 @@ class MockCalendarScheduler:
             'id': f"mock-{len(self.appointments) + 1}",
             'summary': f"{customer_data.appointment_type} with {customer_data.name}",
             'start': customer_data.appointment_time,
-            'end': (datetime.fromisoformat(customer_data.appointment_time) + timedelta(hours=1)).isoformat(),
+            'end': (datetime.fromisoformat(customer_data.appointment_time.replace('Z', '+00:00') 
+                                         if customer_data.appointment_time.endswith('Z') 
+                                         else customer_data.appointment_time) 
+                   + timedelta(hours=1)).isoformat(),
             'attendees': [customer_data.email],
             'link': f"https://example.com/calendar/event/{len(self.appointments) + 1}"
         }
@@ -468,6 +499,9 @@ class MockCalendarScheduler:
         }
 
 
+# Global storage for customer data
+customer_data_store = {}
+
 # Voice Agent class
 class VoiceAgent:
     def __init__(self):
@@ -481,6 +515,7 @@ class VoiceAgent:
         self.input_device_id = None
         self.output_device_id = None
         self.customer_data = CustomerData()
+        self.session_id = secrets.token_hex(8)  # Generate a unique session ID
         
         # Use mock scheduler if USE_MOCK_CALENDAR is set to True
         if os.environ.get("USE_MOCK_CALENDAR", "false").lower() == "true":
@@ -663,8 +698,8 @@ class VoiceAgent:
                 self.customer_data.email = parameters.get("email")
                 self.customer_data.phone = parameters.get("phone")
                 
-                # Store in session
-                session["customer_data"] = self.customer_data.to_dict()
+                # Store in global dictionary instead of session
+                customer_data_store[self.session_id] = self.customer_data.to_dict()
                 
                 result = {
                     "status": "success",
@@ -702,8 +737,12 @@ class VoiceAgent:
                 self.customer_data.appointment_type = parameters.get("appointment_type")
                 self.customer_data.appointment_time = parameters.get("appointment_time")
                 
-                # Update session
-                session["customer_data"] = self.customer_data.to_dict()
+                # Update in global dictionary
+                if self.session_id in customer_data_store:
+                    customer_data_dict = customer_data_store[self.session_id]
+                    customer_data_dict["appointment_type"] = self.customer_data.appointment_type
+                    customer_data_dict["appointment_time"] = self.customer_data.appointment_time
+                    customer_data_store[self.session_id] = customer_data_dict
                 
                 # Schedule the appointment
                 appointment_result = await self.calendar_scheduler.schedule_appointment(self.customer_data)
