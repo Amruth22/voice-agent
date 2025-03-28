@@ -9,7 +9,6 @@ import queue
 import time
 from datetime import datetime, timedelta
 import pyaudio
-import websockets
 import janus
 import base64
 from google.oauth2.credentials import Credentials
@@ -21,6 +20,14 @@ import secrets
 from functools import wraps
 from dotenv import load_dotenv
 import sys
+
+# Import Deepgram SDK
+from deepgram import (
+    DeepgramClient,
+    DeepgramClientOptions,
+    AgentWebSocketEvents,
+    SettingsConfigurationOptions,
+)
 
 # Load environment variables from .env file
 load_dotenv()
@@ -39,9 +46,6 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 
 # Google Calendar API scopes
 SCOPES = ['https://www.googleapis.com/auth/calendar']
-
-# Deepgram Voice Agent URL
-VOICE_AGENT_URL = "wss://agent.deepgram.com/agent"
 
 # Audio settings
 USER_AUDIO_SAMPLE_RATE = 48000
@@ -98,39 +102,82 @@ When you need to indicate you're looking something up, use phrases like:
 # Voice agent settings
 VOICE = "aura-asteria-en"
 
-SETTINGS = {
-    "type": "SettingsConfiguration",
-    "audio": {
-        "input": {
-            "encoding": "linear16",
-            "sample_rate": USER_AUDIO_SAMPLE_RATE,
-        },
-        "output": {
-            "encoding": "linear16",
-            "sample_rate": AGENT_AUDIO_SAMPLE_RATE,
-            "container": "none",
-        },
+# Function definitions for the voice agent
+FUNCTION_DEFINITIONS = [
+    {
+        "name": "get_customer_info",
+        "description": "Get information about the customer for scheduling an appointment",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Customer's full name"
+                },
+                "email": {
+                    "type": "string",
+                    "description": "Customer's email address for calendar invitation"
+                },
+                "phone": {
+                    "type": "string",
+                    "description": "Customer's phone number (optional)"
+                }
+            },
+            "required": ["name", "email"]
+        }
     },
-    "agent": {
-        "listen": {"model": "nova-2"},
-        "think": {
-            "provider": {"type": "open_ai"},
-            "model": "gpt-4o-mini",
-            "instructions": PROMPT_TEMPLATE,
-            "functions": [],  # Will be populated with function definitions
-        },
-        "speak": {"model": VOICE},
+    {
+        "name": "check_availability",
+        "description": "Check available appointment slots within a date range",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "start_date": {
+                    "type": "string",
+                    "description": "Start date in ISO format (YYYY-MM-DDTHH:MM:SS). Usually today's date for immediate availability checks."
+                },
+                "end_date": {
+                    "type": "string",
+                    "description": "End date in ISO format. Optional - defaults to 7 days after start_date."
+                }
+            },
+            "required": ["start_date"]
+        }
     },
-    "context": {
-        "messages": [
-            {
-                "role": "assistant",
-                "content": "Hello! I'm your appointment scheduling assistant. How can I help you today?",
-            }
-        ],
-        "replay": True,
+    {
+        "name": "schedule_appointment",
+        "description": "Schedule a new appointment in Google Calendar",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "appointment_type": {
+                    "type": "string",
+                    "description": "Type of appointment",
+                    "enum": ["Consultation", "Follow-up", "Review", "Planning"]
+                },
+                "appointment_time": {
+                    "type": "string",
+                    "description": "Appointment date and time in ISO format (YYYY-MM-DDTHH:MM:SS)"
+                }
+            },
+            "required": ["appointment_type", "appointment_time"]
+        }
     },
-}
+    {
+        "name": "end_conversation",
+        "description": "End the conversation after scheduling is complete",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "Farewell message to display to the user"
+                }
+            },
+            "required": ["message"]
+        }
+    }
+]
 
 # Customer data class
 class CustomerData:
@@ -317,93 +364,13 @@ class GoogleCalendarScheduler:
             return {"error": f"Failed to schedule appointment: {str(e)}"}
 
 
-# Function definitions for the voice agent
-FUNCTION_DEFINITIONS = [
-    {
-        "name": "get_customer_info",
-        "description": "Get information about the customer for scheduling an appointment",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "Customer's full name"
-                },
-                "email": {
-                    "type": "string",
-                    "description": "Customer's email address for calendar invitation"
-                },
-                "phone": {
-                    "type": "string",
-                    "description": "Customer's phone number (optional)"
-                }
-            },
-            "required": ["name", "email"]
-        }
-    },
-    {
-        "name": "check_availability",
-        "description": "Check available appointment slots within a date range",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "start_date": {
-                    "type": "string",
-                    "description": "Start date in ISO format (YYYY-MM-DDTHH:MM:SS). Usually today's date for immediate availability checks."
-                },
-                "end_date": {
-                    "type": "string",
-                    "description": "End date in ISO format. Optional - defaults to 7 days after start_date."
-                }
-            },
-            "required": ["start_date"]
-        }
-    },
-    {
-        "name": "schedule_appointment",
-        "description": "Schedule a new appointment in Google Calendar",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "appointment_type": {
-                    "type": "string",
-                    "description": "Type of appointment",
-                    "enum": ["Consultation", "Follow-up", "Review", "Planning"]
-                },
-                "appointment_time": {
-                    "type": "string",
-                    "description": "Appointment date and time in ISO format (YYYY-MM-DDTHH:MM:SS)"
-                }
-            },
-            "required": ["appointment_type", "appointment_time"]
-        }
-    },
-    {
-        "name": "end_conversation",
-        "description": "End the conversation after scheduling is complete",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "message": {
-                    "type": "string",
-                    "description": "Farewell message to display to the user"
-                }
-            },
-            "required": ["message"]
-        }
-    }
-]
-
-# Update settings with function definitions
-SETTINGS["agent"]["think"]["functions"] = FUNCTION_DEFINITIONS
-
-
 # Voice Agent class
 class VoiceAgent:
     def __init__(self):
         self.mic_audio_queue = asyncio.Queue()
         self.speaker = None
-        self.ws = None
+        self.dg_client = None
+        self.dg_connection = None
         self.is_running = False
         self.loop = None
         self.audio = None
@@ -422,46 +389,131 @@ class VoiceAgent:
             logger.error("DEEPGRAM_API_KEY env var not present")
             return False
 
-        # Format the prompt with the current date
-        current_date = datetime.now().strftime("%A, %B %d, %Y")
-        formatted_prompt = PROMPT_TEMPLATE.format(current_date=current_date)
-
-        # Update the settings with the formatted prompt
-        settings = SETTINGS.copy()
-        settings["agent"]["think"]["instructions"] = formatted_prompt
-
         try:
-            # Connect to Deepgram Voice Agent API
-            logger.info("Connecting to Deepgram Voice Agent API...")
+            # Format the prompt with the current date
+            current_date = datetime.now().strftime("%A, %B %d, %Y")
+            formatted_prompt = PROMPT_TEMPLATE.format(current_date=current_date)
             
-            # Create connection with proper headers according to documentation
-            headers = {"Authorization": f"Token {dg_api_key}"}
-            
-            # Use websockets.connect with headers
-            self.ws = await websockets.connect(
-                VOICE_AGENT_URL,
-                extra_headers=headers
+            # Set up Deepgram client
+            logger.info("Setting up Deepgram client...")
+            config = DeepgramClientOptions(
+                options={
+                    "keepalive": "true",
+                    "microphone_record": "false",  # We'll handle the microphone ourselves
+                    "speaker_playback": "false",   # We'll handle audio playback ourselves
+                }
             )
+            self.dg_client = DeepgramClient(api_key=dg_api_key, config=config)
             
-            logger.info("Connected to Deepgram Voice Agent API")
+            # Create a websocket connection to Deepgram
+            self.dg_connection = self.dg_client.agent.websocket.v("1")
             
-            # Send settings configuration
-            logger.info("Sending SettingsConfiguration...")
-            await self.ws.send(json.dumps(settings))
+            # Set up event handlers
+            self.setup_event_handlers()
             
-            # Wait for settings applied confirmation
-            response = await self.ws.recv()
-            response_json = json.loads(response)
-            if response_json.get("type") == "SettingsApplied":
-                logger.info("Settings applied successfully")
+            # Configure agent settings
+            options = SettingsConfigurationOptions()
+            options.audio.input.encoding = "linear16"
+            options.audio.input.sample_rate = USER_AUDIO_SAMPLE_RATE
+            options.audio.output.encoding = "linear16"
+            options.audio.output.sample_rate = AGENT_AUDIO_SAMPLE_RATE
+            options.audio.output.container = "none"
             
+            options.agent.listen.model = "nova-2"
+            options.agent.think.provider.type = "open_ai"
+            options.agent.think.model = "gpt-4o-mini"
+            options.agent.think.instructions = formatted_prompt
+            options.agent.think.functions = FUNCTION_DEFINITIONS
+            options.agent.speak.model = VOICE
+            
+            options.context.messages = [
+                {
+                    "role": "assistant",
+                    "content": "Hello! I'm your appointment scheduling assistant. How can I help you today?",
+                }
+            ]
+            options.context.replay = True
+            
+            # Start the connection
+            logger.info("Starting Deepgram connection...")
+            if self.dg_connection.start(options) is False:
+                logger.error("Failed to start Deepgram connection")
+                return False
+                
+            logger.info("Deepgram connection established successfully")
             return True
+            
         except Exception as e:
             logger.error(f"Failed to connect to Deepgram: {e}")
-            # Print more detailed error information
             import traceback
             logger.error(traceback.format_exc())
             return False
+
+    def setup_event_handlers(self):
+        """Set up event handlers for Deepgram websocket events"""
+        
+        def on_open(self, open, **kwargs):
+            logger.info(f"Deepgram connection opened: {open}")
+            
+        def on_welcome(self, welcome, **kwargs):
+            logger.info(f"Received welcome message: {welcome}")
+            
+        def on_settings_applied(self, settings_applied, **kwargs):
+            logger.info(f"Settings applied: {settings_applied}")
+            
+        def on_conversation_text(self, conversation_text, **kwargs):
+            logger.info(f"Conversation text: {conversation_text}")
+            # Emit the conversation text to the client
+            socketio.emit("conversation_update", conversation_text)
+            
+        def on_user_started_speaking(self, user_started_speaking, **kwargs):
+            logger.info(f"User started speaking: {user_started_speaking}")
+            if self.speaker:
+                self.speaker.stop()
+                
+        def on_function_call_request(self, function_call_request, **kwargs):
+            logger.info(f"Function call request: {function_call_request}")
+            
+            # Extract function call details
+            function_name = function_call_request.get("function_name")
+            function_call_id = function_call_request.get("function_call_id")
+            parameters = function_call_request.get("input", {})
+            
+            # Handle the function call asynchronously
+            asyncio.run_coroutine_threadsafe(
+                self.handle_function_call(function_name, function_call_id, parameters),
+                self.loop
+            )
+            
+        def on_binary_data(self, data, **kwargs):
+            # Handle audio data from Deepgram
+            if self.speaker:
+                asyncio.run_coroutine_threadsafe(
+                    self.speaker.play(data),
+                    self.loop
+                )
+                
+            # Convert audio to base64 and emit to client
+            audio_b64 = base64.b64encode(data).decode('utf-8')
+            socketio.emit("audio_chunk", {"audio": audio_b64})
+            
+        def on_close(self, close, **kwargs):
+            logger.info(f"Connection closed: {close}")
+            self.is_running = False
+            
+        def on_error(self, error, **kwargs):
+            logger.error(f"Error from Deepgram: {error}")
+            
+        # Register event handlers
+        self.dg_connection.on(AgentWebSocketEvents.Open, on_open)
+        self.dg_connection.on(AgentWebSocketEvents.Welcome, on_welcome)
+        self.dg_connection.on(AgentWebSocketEvents.SettingsApplied, on_settings_applied)
+        self.dg_connection.on(AgentWebSocketEvents.ConversationText, on_conversation_text)
+        self.dg_connection.on(AgentWebSocketEvents.UserStartedSpeaking, on_user_started_speaking)
+        self.dg_connection.on(AgentWebSocketEvents.FunctionCallRequest, on_function_call_request)
+        self.dg_connection.on(AgentWebSocketEvents.AudioData, on_binary_data)
+        self.dg_connection.on(AgentWebSocketEvents.Close, on_close)
+        self.dg_connection.on(AgentWebSocketEvents.Error, on_error)
 
     def audio_callback(self, input_data, frame_count, time_info, status_flag):
         if self.is_running and self.loop and not self.loop.is_closed():
@@ -533,13 +585,19 @@ class VoiceAgent:
                 self.audio.terminate()
             except Exception as e:
                 logger.error(f"Error terminating audio: {e}")
+                
+        if self.dg_connection:
+            try:
+                self.dg_connection.finish()
+            except Exception as e:
+                logger.error(f"Error closing Deepgram connection: {e}")
 
     async def sender(self):
         try:
             while self.is_running:
                 data = await self.mic_audio_queue.get()
-                if self.ws and data:
-                    await self.ws.send(data)
+                if self.dg_connection and data:
+                    self.dg_connection.send_audio(data)
         except Exception as e:
             logger.error(f"Error in sender: {e}")
 
@@ -614,61 +672,17 @@ class VoiceAgent:
         except Exception as e:
             logger.error(f"Error executing function: {str(e)}")
             result = {"error": str(e)}
-            
+        
+        # Send the function call response
+        response = {
+            "type": "FunctionCallResponse",
+            "function_call_id": function_call_id,
+            "output": json.dumps(result)
+        }
+        
+        self.dg_connection.send_json(response)
+        logger.info(f"Function response sent: {json.dumps(result)}")
         return result
-
-    async def receiver(self):
-        try:
-            self.speaker = Speaker()
-            
-            with self.speaker:
-                async for message in self.ws:
-                    if isinstance(message, str):
-                        logger.info(f"Server: {message}")
-                        message_json = json.loads(message)
-                        message_type = message_json.get("type")
-                        
-                        if message_type == "UserStartedSpeaking":
-                            self.speaker.stop()
-                        elif message_type == "ConversationText":
-                            # Emit the conversation text to the client
-                            socketio.emit("conversation_update", message_json)
-                            
-                        elif message_type == "FunctionCallRequest":
-                            function_name = message_json.get("function_name")
-                            function_call_id = message_json.get("function_call_id")
-                            parameters = message_json.get("input", {})
-                            
-                            # Handle the function call
-                            result = await self.handle_function_call(function_name, function_call_id, parameters)
-                            
-                            # Send the response back
-                            response = {
-                                "type": "FunctionCallResponse",
-                                "function_call_id": function_call_id,
-                                "output": json.dumps(result),
-                            }
-                            await self.ws.send(json.dumps(response))
-                            logger.info(f"Function response sent: {json.dumps(result)}")
-                            
-                        elif message_type == "Welcome":
-                            logger.info(f"Connected with session ID: {message_json.get('session_id')}")
-                            
-                        elif message_type == "CloseConnection":
-                            logger.info("Closing connection...")
-                            await self.ws.close()
-                            break
-                            
-                    elif isinstance(message, bytes):
-                        # Convert audio to base64 and emit to client
-                        audio_b64 = base64.b64encode(message).decode('utf-8')
-                        socketio.emit("audio_chunk", {"audio": audio_b64})
-                        
-                        # Also play through speaker
-                        await self.speaker.play(message)
-
-        except Exception as e:
-            logger.error(f"Error in receiver: {e}")
 
     async def run(self):
         if not await self.setup():
@@ -676,18 +690,16 @@ class VoiceAgent:
 
         self.is_running = True
         try:
-            stream, audio = await self.start_microphone()
-            await asyncio.gather(
-                self.sender(),
-                self.receiver(),
-            )
+            self.speaker = Speaker()
+            with self.speaker:
+                stream, audio = await self.start_microphone()
+                # Just run the sender task - the receiver is handled by event handlers
+                await self.sender()
         except Exception as e:
             logger.error(f"Error in run: {e}")
         finally:
             self.is_running = False
             self.cleanup()
-            if self.ws:
-                await self.ws.close()
 
 
 class Speaker:
@@ -853,26 +865,22 @@ def handle_stop_voice_agent():
 def handle_send_text(data):
     """Handle text input from the user"""
     text = data.get("text", "")
-    if text and voice_agent and voice_agent.ws:
+    if text and voice_agent and voice_agent.dg_connection:
         try:
             # Create a message to inject user text
             message = {
                 "type": "InjectUserMessage",
                 "message": text
             }
-            # Use run_coroutine_threadsafe to send the message
-            asyncio.run_coroutine_threadsafe(
-                voice_agent.ws.send(json.dumps(message)),
-                voice_agent.loop
-            )
+            # Send the message
+            voice_agent.dg_connection.send_json(message)
         except Exception as e:
             logger.error(f"Error sending text: {e}")
 
 
 if __name__ == "__main__":
-    # Print Python and package versions for debugging
+    # Print Python version for debugging
     print(f"Python version: {sys.version}")
-    print(f"Websockets version: {websockets.__version__}")
     
     # Check if Deepgram API key is set
     if not os.environ.get("DEEPGRAM_API_KEY"):
