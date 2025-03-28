@@ -430,10 +430,11 @@ class VoiceAgent:
         settings["agent"]["think"]["instructions"] = formatted_prompt
 
         try:
-            self.ws = await websockets.connect(
-                VOICE_AGENT_URL,
-                extra_headers={"Authorization": f"Token {dg_api_key}"},
-            )
+            # Create headers dictionary
+            headers = {"Authorization": f"Token {dg_api_key}"}
+            
+            # Connect to Deepgram with headers
+            self.ws = await websockets.connect(VOICE_AGENT_URL, extra_headers=headers)
             await self.ws.send(json.dumps(settings))
             return True
         except Exception as e:
@@ -853,6 +854,10 @@ if __name__ == "__main__":
         print("⚠️  WARNING: DEEPGRAM_API_KEY environment variable is not set!")
         print("The voice agent will not work without this key.")
         print("Please set it in your .env file or export it in your terminal.")
+        print("=" * 60 + "\n")
+    else:
+        print("\n" + "=" * 60)
+        print(f"Using Deepgram API key: {os.environ.get('DEEPGRAM_API_KEY')[:5]}...")
         print("=" * 60 + "\n")
     
     print("\n" + "=" * 60)
