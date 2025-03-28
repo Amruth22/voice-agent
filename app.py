@@ -19,6 +19,10 @@ from googleapiclient.discovery import build
 import pickle
 import secrets
 from functools import wraps
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(
@@ -843,6 +847,14 @@ def handle_send_text(data):
 
 
 if __name__ == "__main__":
+    # Check if Deepgram API key is set
+    if not os.environ.get("DEEPGRAM_API_KEY"):
+        print("\n" + "=" * 60)
+        print("⚠️  WARNING: DEEPGRAM_API_KEY environment variable is not set!")
+        print("The voice agent will not work without this key.")
+        print("Please set it in your .env file or export it in your terminal.")
+        print("=" * 60 + "\n")
+    
     print("\n" + "=" * 60)
     print("🚀 Voice Agent Calendar Scheduler Starting!")
     print("=" * 60)
