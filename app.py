@@ -257,10 +257,19 @@ class GoogleCalendarScheduler:
                 if not os.path.exists(self.credentials_file):
                     logger.error(f"Credentials file not found: {self.credentials_file}")
                     return False
-                    
+                
+                # Set this to allow insecure local redirect
+                os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
+                
+                # For personal use, we can use a more permissive client
                 flow = InstalledAppFlow.from_client_secrets_file(
-                    self.credentials_file, SCOPES)
-                creds = flow.run_local_server(port=0)
+                    self.credentials_file, 
+                    SCOPES,
+                    redirect_uri='http://localhost:8080/'
+                )
+                
+                # Run the local server with a specific port
+                creds = flow.run_local_server(port=8080)
                 logger.info("New credentials obtained")
                 
                 # Save credentials for future use
@@ -400,6 +409,65 @@ class GoogleCalendarScheduler:
             return {"error": f"Failed to schedule appointment: {str(e)}"}
 
 
+# Mock Calendar Scheduler for testing without Google Calendar
+class MockCalendarScheduler:
+    """Mock implementation of calendar operations for testing"""
+    
+    def __init__(self):
+        self.appointments = []
+    
+    async def get_available_slots(self, start_date, end_date=None, calendar_id='primary'):
+        """Get mock available appointment slots"""
+        logger.info(f"Getting mock available slots from {start_date} to {end_date or 'week later'}")
+        
+        if not end_date:
+            end_date = (datetime.fromisoformat(start_date) + timedelta(days=7)).isoformat()
+        
+        # Generate available slots (9 AM to 5 PM, 1-hour slots)
+        available_slots = []
+        current = datetime.fromisoformat(start_date)
+        end = datetime.fromisoformat(end_date)
+        
+        while current <= end:
+            if current.hour >= 9 and current.hour < 17:
+                # Skip weekends
+                if current.weekday() < 5:  # 0-4 are Monday to Friday
+                    slot_time = current.isoformat()
+                    available_slots.append(slot_time)
+            current += timedelta(hours=1)
+        
+        logger.info(f"Generated {len(available_slots)} mock available slots")
+        return {"available_slots": available_slots}
+    
+    async def schedule_appointment(self, customer_data, calendar_id='primary'):
+        """Schedule a mock appointment"""
+        logger.info(f"Scheduling mock appointment for {customer_data.name}")
+        
+        if not customer_data.is_valid_for_appointment():
+            logger.error("Incomplete customer data for appointment")
+            return {"error": "Incomplete customer data for appointment"}
+        
+        # Create a mock appointment
+        appointment = {
+            'id': f"mock-{len(self.appointments) + 1}",
+            'summary': f"{customer_data.appointment_type} with {customer_data.name}",
+            'start': customer_data.appointment_time,
+            'end': (datetime.fromisoformat(customer_data.appointment_time) + timedelta(hours=1)).isoformat(),
+            'attendees': [customer_data.email],
+            'link': f"https://example.com/calendar/event/{len(self.appointments) + 1}"
+        }
+        
+        self.appointments.append(appointment)
+        logger.info(f"Mock appointment created: {appointment}")
+        
+        return {
+            "status": "success",
+            "event_id": appointment['id'],
+            "event_link": appointment['link'],
+            "appointment_time": customer_data.appointment_time
+        }
+
+
 # Voice Agent class
 class VoiceAgent:
     def __init__(self):
@@ -413,7 +481,14 @@ class VoiceAgent:
         self.input_device_id = None
         self.output_device_id = None
         self.customer_data = CustomerData()
-        self.calendar_scheduler = GoogleCalendarScheduler()
+        
+        # Use mock scheduler if USE_MOCK_CALENDAR is set to True
+        if os.environ.get("USE_MOCK_CALENDAR", "false").lower() == "true":
+            logger.info("Using mock calendar scheduler")
+            self.calendar_scheduler = MockCalendarScheduler()
+        else:
+            logger.info("Using Google Calendar scheduler")
+            self.calendar_scheduler = GoogleCalendarScheduler()
         
     def set_loop(self, loop):
         self.loop = loop
@@ -951,6 +1026,12 @@ if __name__ == "__main__":
     else:
         print("\n" + "=" * 60)
         print(f"Found credentials.json file")
+        print("=" * 60 + "\n")
+    
+    # Check if using mock calendar
+    if os.environ.get("USE_MOCK_CALENDAR", "false").lower() == "true":
+        print("\n" + "=" * 60)
+        print("🔄 Using MOCK calendar scheduler (no Google Calendar API calls)")
         print("=" * 60 + "\n")
     
     print("\n" + "=" * 60)
