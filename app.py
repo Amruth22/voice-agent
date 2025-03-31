@@ -25,6 +25,13 @@ import eventlet
 # Patch for eventlet with asyncio
 eventlet.monkey_patch()
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 # Try to import PyAudio, but provide a fallback if it's not available
 try:
     import pyaudio
@@ -81,13 +88,6 @@ except ImportError:
 
 # Load environment variables from .env file
 load_dotenv()
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 # Flask app setup
 app = Flask(__name__, static_folder="./static", static_url_path="/")
