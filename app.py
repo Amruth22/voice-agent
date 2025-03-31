@@ -22,6 +22,8 @@ from dotenv import load_dotenv
 import sys
 import websockets
 import traceback
+import struct
+import numpy as np
 
 # Load environment variables from .env file
 load_dotenv()
@@ -53,6 +55,10 @@ AGENT_AUDIO_SAMPLE_RATE = 16000
 AGENT_AUDIO_BYTES_PER_SEC = 2 * AGENT_AUDIO_SAMPLE_RATE
 name = os.environ.get("CUSTOMER_NAME", "Aamruth")
 email = os.environ.get("CUSTOMER_EMAIL", 'chatgptplus1999@gmail.com')
+
+# Heartbeat settings
+HEARTBEAT_INTERVAL = 5  # Send silent audio every 5 seconds if no user audio
+LAST_AUDIO_SENT_THRESHOLD = 8  # Consider connection stale after 8 seconds of no audio
 
 # Template for the prompt that will be formatted with current date
 PROMPT_TEMPLATE = """You are a friendly and professional real estate appointment scheduler for Premium Properties. Your role is to assist potential buyers in scheduling property viewings in Google Calendar.
@@ -525,6 +531,24 @@ class MockCalendarScheduler:
 # Global storage for customer data
 customer_data_store = {}
 
+# Function to generate silent audio frames for heartbeat
+def generate_silent_audio(duration_ms=100, sample_rate=USER_AUDIO_SAMPLE_RATE):
+    """Generate silent audio data for heartbeat"""
+    # Calculate number of samples
+    num_samples = int(duration_ms * sample_rate / 1000)
+    
+    # Create silent audio (very low amplitude, not completely zero to avoid optimization)
+    silent_audio = np.zeros(num_samples, dtype=np.float32)
+    
+    # Add minimal noise to prevent optimization
+    silent_audio += np.random.normal(0, 0.0001, num_samples)
+    
+    # Convert to int16 PCM format
+    silent_pcm = (silent_audio * 32767).astype(np.int16)
+    
+    # Convert to bytes
+    return silent_pcm.tobytes()
+
 # Voice Agent class
 class VoiceAgent:
     def __init__(self):
@@ -541,6 +565,8 @@ class VoiceAgent:
         self.loop = loop  # Store the loop
         self.customer_data = CustomerData()
         self.session_id = secrets.token_hex(8)  # Generate a unique session ID
+        self.last_audio_sent_time = time.time()  # Track when we last sent audio
+        self.heartbeat_task = None  # Task for sending heartbeat audio
         
         # Use mock scheduler if USE_MOCK_CALENDAR is set to True
         if os.environ.get("USE_MOCK_CALENDAR", "false").lower() == "true":
@@ -626,14 +652,49 @@ class VoiceAgent:
             logger.error(traceback.format_exc())
             return False
 
+    async def heartbeat(self):
+        """Send silent audio frames periodically to keep the connection alive"""
+        try:
+            logger.info("Starting heartbeat task")
+            while self.is_running:
+                # Check if we need to send a heartbeat
+                current_time = time.time()
+                time_since_last_audio = current_time - self.last_audio_sent_time
+                
+                if time_since_last_audio >= HEARTBEAT_INTERVAL:
+                    # Generate and send silent audio
+                    silent_audio = generate_silent_audio()
+                    if self.ws:
+                        logger.info(f"Sending heartbeat audio after {time_since_last_audio:.1f}s of silence")
+                        await self.ws.send(silent_audio)
+                        self.last_audio_sent_time = current_time
+                
+                # Wait a bit before checking again
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            logger.info("Heartbeat task cancelled")
+        except Exception as e:
+            logger.error(f"Error in heartbeat task: {e}")
+            logger.error(traceback.format_exc())
+
     async def sender(self):
         try:
             while self.is_running:
-                data = await self.mic_audio_queue.get()
-                if self.ws and data:
-                    await self.ws.send(data)
+                # Use wait_for with a timeout to avoid blocking indefinitely
+                try:
+                    # Wait for data with a timeout
+                    data = await asyncio.wait_for(self.mic_audio_queue.get(), timeout=0.5)
+                    if self.ws and data:
+                        await self.ws.send(data)
+                        self.last_audio_sent_time = time.time()  # Update last audio sent time
+                except asyncio.TimeoutError:
+                    # No data received within timeout, continue the loop
+                    continue
+        except asyncio.CancelledError:
+            logger.info("Sender task cancelled")
         except Exception as e:
             logger.error(f"Error in sender: {e}")
+            logger.error(traceback.format_exc())
 
     async def handle_function_call(self, function_name, function_call_id, parameters):
         """Handle function calls from the voice agent"""
@@ -788,7 +849,13 @@ class VoiceAgent:
             return
 
         self.is_running = True
+        self.last_audio_sent_time = time.time()  # Initialize last audio sent time
+        
         try:
+            # Start the heartbeat task
+            self.heartbeat_task = asyncio.create_task(self.heartbeat())
+            
+            # Run the sender and receiver tasks
             await asyncio.gather(
                 self.sender(),
                 self.receiver(),
@@ -798,7 +865,14 @@ class VoiceAgent:
             logger.error(traceback.format_exc())
         finally:
             self.is_running = False
-            # No need to call cleanup since we're not using local audio devices anymore
+            
+            # Cancel the heartbeat task if it's running
+            if self.heartbeat_task and not self.heartbeat_task.done():
+                self.heartbeat_task.cancel()
+                try:
+                    await self.heartbeat_task
+                except asyncio.CancelledError:
+                    pass
 
 
 # Global voice agent instance
