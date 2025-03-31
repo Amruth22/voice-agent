@@ -23,6 +23,9 @@ let audioProcessor = null;
 let audioSource = null;
 let userAudioStream = null;
 let isCapturingAudio = false;
+let audioQueue = [];
+let isPlayingAudio = false;
+let selectedOutputDevice = 'default';
 
 // Initialize the page
 document.addEventListener('DOMContentLoaded', () => {
@@ -34,17 +37,63 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // Check if browser supports getUserMedia
     checkBrowserSupport();
+    
+    // Add notice about Ngrok deployment
+    addNgrokNotice();
 });
 
-// Check if browser supports getUserMedia
+// Add notice about Ngrok deployment
+function addNgrokNotice() {
+    // Check if we're running on Ngrok by looking at the hostname
+    const isNgrok = window.location.hostname.includes('ngrok');
+    
+    if (isNgrok) {
+        const noticeElement = document.createElement('div');
+        noticeElement.className = 'alert alert-info mb-3';
+        noticeElement.innerHTML = `
+            <strong>Remote Access Mode:</strong> This application is running on a remote server.
+            You will need to grant microphone permission to use voice features.
+            Audio will be processed on the remote server but played through your local speakers.
+        `;
+        chatContainer.prepend(noticeElement);
+        
+        addLogEntry('Running in remote access mode via Ngrok', 'info');
+    }
+}
+
+// Check if browser supports getUserMedia and AudioContext
 function checkBrowserSupport() {
+    let supportMessage = '';
+    let supportType = 'info';
+    
+    // Check microphone support
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        addLogEntry('Your browser does not support microphone access. Text-only mode will be used.', 'warning');
+        supportMessage += 'Your browser does not support microphone access. ';
+        supportType = 'warning';
         micToggle.disabled = true;
         micToggle.checked = false;
     } else {
-        addLogEntry('Browser supports microphone access');
+        supportMessage += 'Microphone access supported. ';
     }
+    
+    // Check AudioContext support
+    if (!window.AudioContext && !window.webkitAudioContext) {
+        supportMessage += 'Your browser does not support AudioContext. Audio processing may be limited. ';
+        supportType = 'warning';
+    } else {
+        supportMessage += 'Audio processing supported. ';
+    }
+    
+    // Check audio output selection support
+    if (typeof HTMLAudioElement.prototype.setSinkId !== 'function') {
+        supportMessage += 'Your browser does not support audio output selection. Default speakers will be used.';
+        supportType = 'warning';
+        outputDeviceSelect.disabled = true;
+    } else {
+        supportMessage += 'Audio output selection supported.';
+    }
+    
+    addLogEntry(supportMessage, supportType);
 }
 
 // Request access to user's microphone
@@ -147,9 +196,6 @@ function stopAudioCapture() {
 
 // Load available audio devices
 function loadAudioDevices() {
-    // For Ngrok deployment, we don't need to load devices from the server
-    // as we'll use the browser's getUserMedia API directly
-    
     if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
         navigator.mediaDevices.enumerateDevices()
             .then(devices => {
@@ -186,7 +232,18 @@ function loadAudioDevices() {
                     outputDeviceSelect.appendChild(option);
                 });
                 
-                addLogEntry('Audio devices loaded from browser');
+                // If no labels are available, it means permission hasn't been granted yet
+                if (audioInputDevices.length > 0 && !audioInputDevices[0].label) {
+                    addLogEntry('Grant microphone permission to see device names', 'warning');
+                } else {
+                    addLogEntry('Audio devices loaded from browser');
+                }
+                
+                // Check if output selection is supported
+                if (typeof HTMLAudioElement.prototype.setSinkId !== 'function') {
+                    outputDeviceSelect.disabled = true;
+                    addLogEntry('Your browser does not support audio output selection', 'warning');
+                }
             })
             .catch(error => {
                 addLogEntry(`Error enumerating audio devices: ${error.message}`, 'error');
@@ -250,8 +307,42 @@ function setupEventListeners() {
         addLogEntry(`Microphone ${micToggle.checked ? 'enabled' : 'disabled'}`);
     });
     
+    // Output device selection
+    outputDeviceSelect.addEventListener('change', () => {
+        selectedOutputDevice = outputDeviceSelect.value;
+        
+        // Try to set the audio output device if supported
+        if (typeof agentAudio.setSinkId === 'function') {
+            agentAudio.setSinkId(selectedOutputDevice)
+                .then(() => {
+                    addLogEntry(`Audio output set to: ${outputDeviceSelect.options[outputDeviceSelect.selectedIndex].text}`, 'success');
+                })
+                .catch(error => {
+                    addLogEntry(`Error setting audio output: ${error.message}`, 'error');
+                });
+        }
+    });
+    
     // Socket.IO event listeners
     setupSocketListeners();
+    
+    // Audio element events
+    agentAudio.addEventListener('ended', () => {
+        isAgentSpeaking = false;
+        updateSpeakingIndicator(false);
+        
+        // Play next audio in queue if any
+        playNextAudioInQueue();
+    });
+    
+    agentAudio.addEventListener('error', (e) => {
+        addLogEntry(`Audio playback error: ${e.target.error.message || 'Unknown error'}`, 'error');
+        isAgentSpeaking = false;
+        updateSpeakingIndicator(false);
+        
+        // Try to play next audio in queue
+        playNextAudioInQueue();
+    });
 }
 
 // Set up Socket.IO event listeners
@@ -272,9 +363,9 @@ function setupSocketListeners() {
             updateSpeakingIndicator(true);
         }
         
-        // Play audio
+        // Add audio to queue and play
         const audioData = base64ToArrayBuffer(data.audio);
-        playAudioChunk(audioData);
+        queueAudioForPlayback(audioData);
     });
     
     // Log messages
@@ -294,6 +385,44 @@ function setupSocketListeners() {
             stopVoiceAgent();
         }, 5000);
     });
+    
+    // Connection events
+    socket.on('connect', () => {
+        addLogEntry('Connected to server', 'success');
+    });
+    
+    socket.on('disconnect', () => {
+        addLogEntry('Disconnected from server', 'warning');
+        isAgentRunning = false;
+        startButton.disabled = false;
+        stopButton.disabled = true;
+    });
+    
+    socket.on('connect_error', (error) => {
+        addLogEntry(`Connection error: ${error.message}`, 'error');
+    });
+}
+
+// Queue audio for playback
+function queueAudioForPlayback(audioData) {
+    audioQueue.push(audioData);
+    
+    // If not currently playing, start playback
+    if (!isPlayingAudio) {
+        playNextAudioInQueue();
+    }
+}
+
+// Play next audio in queue
+function playNextAudioInQueue() {
+    if (audioQueue.length === 0) {
+        isPlayingAudio = false;
+        return;
+    }
+    
+    isPlayingAudio = true;
+    const audioData = audioQueue.shift();
+    playAudioChunk(audioData);
 }
 
 // Start the voice agent
@@ -310,11 +439,22 @@ function startVoiceAgent() {
     }
     
     const inputDeviceId = inputDeviceSelect.value;
-    const outputDeviceId = outputDeviceSelect.value;
+    selectedOutputDevice = outputDeviceSelect.value;
+    
+    // Try to set the audio output device if supported
+    if (typeof agentAudio.setSinkId === 'function') {
+        agentAudio.setSinkId(selectedOutputDevice)
+            .then(() => {
+                addLogEntry(`Audio output set to: ${outputDeviceSelect.options[outputDeviceSelect.selectedIndex].text}`, 'success');
+            })
+            .catch(error => {
+                addLogEntry(`Error setting audio output: ${error.message}`, 'error');
+            });
+    }
     
     socket.emit('start_voice_agent', {
         inputDeviceId,
-        outputDeviceId
+        outputDeviceId: selectedOutputDevice
     });
     
     isAgentRunning = true;
@@ -330,6 +470,10 @@ function stopVoiceAgent() {
     
     // Stop audio capture
     stopAudioCapture();
+    
+    // Clear audio queue
+    audioQueue = [];
+    isPlayingAudio = false;
     
     isAgentRunning = false;
     isAgentSpeaking = false;
@@ -569,21 +713,49 @@ function arrayBufferToBase64(buffer) {
 
 // Play audio chunk
 function playAudioChunk(audioData) {
-    const blob = new Blob([audioData], { type: 'audio/wav' });
-    const url = URL.createObjectURL(blob);
-    
-    agentAudio.src = url;
-    agentAudio.play()
-        .catch(error => {
-            addLogEntry(`Error playing audio: ${error.message}`, 'error');
-        });
-    
-    // Clean up URL object after playing
-    agentAudio.onended = () => {
-        URL.revokeObjectURL(url);
-        isAgentSpeaking = false;
-        updateSpeakingIndicator(false);
-    };
+    try {
+        const blob = new Blob([audioData], { type: 'audio/wav' });
+        const url = URL.createObjectURL(blob);
+        
+        // Set the source and play
+        agentAudio.src = url;
+        
+        // Try to set the audio output device if supported
+        if (typeof agentAudio.setSinkId === 'function' && selectedOutputDevice) {
+            agentAudio.setSinkId(selectedOutputDevice)
+                .then(() => {
+                    return agentAudio.play();
+                })
+                .catch(error => {
+                    addLogEntry(`Error setting audio output: ${error.message}`, 'error');
+                    return agentAudio.play();
+                });
+        } else {
+            // Just play with default output
+            agentAudio.play()
+                .catch(error => {
+                    addLogEntry(`Error playing audio: ${error.message}`, 'error');
+                    
+                    // Try to play next audio in queue
+                    playNextAudioInQueue();
+                });
+        }
+        
+        // Clean up URL object after playing
+        agentAudio.onended = () => {
+            URL.revokeObjectURL(url);
+            isAgentSpeaking = false;
+            updateSpeakingIndicator(false);
+            
+            // Play next audio in queue
+            playNextAudioInQueue();
+        };
+    } catch (error) {
+        addLogEntry(`Error preparing audio: ${error.message}`, 'error');
+        
+        // Try to play next audio in queue
+        playNextAudioInQueue();
+    }
 }
 
 // Get current time in HH:MM:SS format
