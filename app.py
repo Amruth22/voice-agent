@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 # Flask app setup
 app = Flask(__name__, static_folder="./static", static_url_path="/")
 app.secret_key = secrets.token_hex(16)
-socketio = SocketIO(app, cors_allowed_origins="*")
+socketio = SocketIO(app, cors_allowed_origins="*", ping_timeout=60, ping_interval=25)
 
 # Google Calendar API scopes
 SCOPES = ['https://www.googleapis.com/auth/calendar']
@@ -51,8 +51,9 @@ USER_AUDIO_SAMPLES_PER_CHUNK = round(USER_AUDIO_SAMPLE_RATE * USER_AUDIO_SECS_PE
 
 AGENT_AUDIO_SAMPLE_RATE = 16000
 AGENT_AUDIO_BYTES_PER_SEC = 2 * AGENT_AUDIO_SAMPLE_RATE
-name="Aamruth"
-email='chatgptplus1999@gmail.com'
+name = os.environ.get("CUSTOMER_NAME", "Aamruth")
+email = os.environ.get("CUSTOMER_EMAIL", 'chatgptplus1999@gmail.com')
+
 # Template for the prompt that will be formatted with current date
 PROMPT_TEMPLATE = """You are a friendly and professional real estate appointment scheduler for Premium Properties. Your role is to assist potential buyers in scheduling property viewings in Google Calendar.
 
@@ -874,6 +875,8 @@ class VoiceAgent:
 
         self.is_running = True
         try:
+            # Only start local microphone if we're not using client-side audio
+            # For Ngrok deployment with remote users, we'll use the audio data sent from the client
             stream, audio = await self.start_microphone()
             await asyncio.gather(
                 self.sender(),
@@ -1078,7 +1081,49 @@ def handle_send_text(data):
             logger.error(traceback.format_exc())
 
 
+@socketio.on("audio_data")
+def handle_audio_data(data):
+    """Handle audio data from the client's microphone"""
+    if voice_agent and voice_agent.ws and voice_agent.is_running:
+        try:
+            # Decode base64 audio data from client
+            audio_data = base64.b64decode(data["audio"])
+            
+            # Put the audio data in the queue to be sent to Deepgram
+            asyncio.run_coroutine_threadsafe(
+                voice_agent.mic_audio_queue.put(audio_data),
+                voice_agent.loop
+            )
+            
+            # Log that we received audio data (but don't log for every chunk to avoid spam)
+            if random.random() < 0.01:  # Log approximately 1% of audio chunks
+                logger.info("Received audio data from client")
+                
+        except Exception as e:
+            logger.error(f"Error handling client audio data: {e}")
+            logger.error(traceback.format_exc())
+
+
+@socketio.on('connect')
+def handle_connect():
+    """Handle client connection"""
+    logger.info(f"Client connected: {request.sid}")
+    socketio.emit('log_message', {'message': 'Connected to server'}, room=request.sid)
+
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    """Handle client disconnection"""
+    logger.info(f"Client disconnected: {request.sid}")
+
+
 if __name__ == "__main__":
+    # Import random for the audio logging
+    import random
+    
+    # Get port from environment variable (Heroku sets this automatically)
+    port = int(os.environ.get("PORT", 5000))
+    
     # Print Python version for debugging
     print(f"Python version: {sys.version}")
     
@@ -1116,10 +1161,10 @@ if __name__ == "__main__":
     print("🚀 Voice Agent Calendar Scheduler Starting!")
     print("=" * 60)
     print("\n1. Open this link in your browser to start the demo:")
-    print("   http://127.0.0.1:5000")
+    print(f"   http://127.0.0.1:{port}")
     print("\n2. Click 'Start Voice Agent' when the page loads")
     print("\n3. Speak with the agent using your microphone or type in the text box")
     print("\nPress Ctrl+C to stop the server\n")
     print("=" * 60 + "\n")
 
-    socketio.run(app, debug=True)
+    socketio.run(app, host="0.0.0.0", port=port)
