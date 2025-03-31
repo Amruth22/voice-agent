@@ -536,14 +536,9 @@ class VoiceAgent:
             asyncio.set_event_loop(loop)
         
         self.mic_audio_queue = asyncio.Queue()
-        self.speaker = None
         self.ws = None
         self.is_running = False
         self.loop = loop  # Store the loop
-        self.audio = None
-        self.stream = None
-        self.input_device_id = None
-        self.output_device_id = None
         self.customer_data = CustomerData()
         self.session_id = secrets.token_hex(8)  # Generate a unique session ID
         
@@ -630,83 +625,6 @@ class VoiceAgent:
             logger.error(f"Failed to connect to Deepgram: {e}")
             logger.error(traceback.format_exc())
             return False
-
-    def audio_callback(self, input_data, frame_count, time_info, status_flag):
-        if self.is_running and self.loop and not self.loop.is_closed():
-            try:
-                future = asyncio.run_coroutine_threadsafe(
-                    self.mic_audio_queue.put(input_data), self.loop
-                )
-                future.result(timeout=1)  # Add timeout to prevent blocking
-            except Exception as e:
-                logger.error(f"Error in audio callback: {e}")
-        return (input_data, pyaudio.paContinue)
-
-    async def start_microphone(self):
-        try:
-            self.audio = pyaudio.PyAudio()
-
-            # List available input devices
-            info = self.audio.get_host_api_info_by_index(0)
-            numdevices = info.get("deviceCount")
-            input_device_index = None
-
-            for i in range(0, numdevices):
-                device_info = self.audio.get_device_info_by_host_api_device_index(0, i)
-                if device_info.get("maxInputChannels") > 0:
-                    logger.info(f"Input Device {i}: {device_info.get('name')}")
-                    # Use selected device if available
-                    if (
-                        self.input_device_id
-                        and str(device_info.get("deviceId")) == self.input_device_id
-                    ):
-                        input_device_index = i
-                        break
-                    # Otherwise use first available device
-                    elif input_device_index is None:
-                        input_device_index = i
-
-            if input_device_index is None:
-                raise Exception("No input device found")
-
-            self.stream = self.audio.open(
-                format=pyaudio.paInt16,
-                channels=1,
-                rate=USER_AUDIO_SAMPLE_RATE,
-                input=True,
-                input_device_index=input_device_index,
-                frames_per_buffer=USER_AUDIO_SAMPLES_PER_CHUNK,
-                stream_callback=self.audio_callback,
-            )
-            self.stream.start_stream()
-            logger.info("Microphone started successfully")
-            return self.stream, self.audio
-        except Exception as e:
-            logger.error(f"Error starting microphone: {e}")
-            if self.audio:
-                self.audio.terminate()
-            raise
-
-    def cleanup(self):
-        """Clean up audio resources"""
-        if self.stream:
-            try:
-                self.stream.stop_stream()
-                self.stream.close()
-            except Exception as e:
-                logger.error(f"Error closing audio stream: {e}")
-
-        if self.audio:
-            try:
-                self.audio.terminate()
-            except Exception as e:
-                logger.error(f"Error terminating audio: {e}")
-                
-        if self.ws:
-            try:
-                asyncio.run_coroutine_threadsafe(self.ws.close(), self.loop)
-            except Exception as e:
-                logger.error(f"Error closing Deepgram connection: {e}")
 
     async def sender(self):
         try:
@@ -826,44 +744,40 @@ class VoiceAgent:
 
     async def receiver(self):
         try:
-            self.speaker = Speaker()
-            
-            with self.speaker:
-                async for message in self.ws:
-                    if isinstance(message, str):
-                        logger.info(f"Server: {message}")
-                        message_json = json.loads(message)
-                        message_type = message_json.get("type")
+            async for message in self.ws:
+                if isinstance(message, str):
+                    logger.info(f"Server: {message}")
+                    message_json = json.loads(message)
+                    message_type = message_json.get("type")
+                    
+                    if message_type == "UserStartedSpeaking":
+                        # Just log this event, no need to stop audio on server
+                        logger.info("User started speaking")
+                    elif message_type == "ConversationText":
+                        # Emit the conversation text to the client
+                        socketio.emit("conversation_update", message_json)
                         
-                        if message_type == "UserStartedSpeaking":
-                            self.speaker.stop()
-                        elif message_type == "ConversationText":
-                            # Emit the conversation text to the client
-                            socketio.emit("conversation_update", message_json)
-                            
-                        elif message_type == "FunctionCallRequest":
-                            function_name = message_json.get("function_name")
-                            function_call_id = message_json.get("function_call_id")
-                            parameters = message_json.get("input", {})
-                            
-                            # Handle the function call
-                            await self.handle_function_call(function_name, function_call_id, parameters)
-                            
-                        elif message_type == "Welcome":
-                            logger.info(f"Connected with session ID: {message_json.get('session_id')}")
-                            
-                        elif message_type == "CloseConnection":
-                            logger.info("Closing connection...")
-                            await self.ws.close()
-                            break
-                            
-                    elif isinstance(message, bytes):
-                        # Convert audio to base64 and emit to client
-                        audio_b64 = base64.b64encode(message).decode('utf-8')
-                        socketio.emit("audio_chunk", {"audio": audio_b64})
+                    elif message_type == "FunctionCallRequest":
+                        function_name = message_json.get("function_name")
+                        function_call_id = message_json.get("function_call_id")
+                        parameters = message_json.get("input", {})
                         
-                        # Also play through speaker
-                        await self.speaker.play(message)
+                        # Handle the function call
+                        await self.handle_function_call(function_name, function_call_id, parameters)
+                        
+                    elif message_type == "Welcome":
+                        logger.info(f"Connected with session ID: {message_json.get('session_id')}")
+                        
+                    elif message_type == "CloseConnection":
+                        logger.info("Closing connection...")
+                        await self.ws.close()
+                        break
+                        
+                elif isinstance(message, bytes):
+                    # Convert audio to base64 and emit to client
+                    # The client will handle playing the audio
+                    audio_b64 = base64.b64encode(message).decode('utf-8')
+                    socketio.emit("audio_chunk", {"audio": audio_b64})
 
         except Exception as e:
             logger.error(f"Error in receiver: {e}")
@@ -875,9 +789,6 @@ class VoiceAgent:
 
         self.is_running = True
         try:
-            # Only start local microphone if we're not using client-side audio
-            # For Ngrok deployment with remote users, we'll use the audio data sent from the client
-            stream, audio = await self.start_microphone()
             await asyncio.gather(
                 self.sender(),
                 self.receiver(),
@@ -887,60 +798,7 @@ class VoiceAgent:
             logger.error(traceback.format_exc())
         finally:
             self.is_running = False
-            self.cleanup()
-
-
-class Speaker:
-    def __init__(self):
-        self._queue = None
-        self._stream = None
-        self._thread = None
-        self._stop = None
-
-    def __enter__(self):
-        audio = pyaudio.PyAudio()
-        self._stream = audio.open(
-            format=pyaudio.paInt16,
-            channels=1,
-            rate=AGENT_AUDIO_SAMPLE_RATE,
-            input=False,
-            output=True,
-        )
-        self._queue = janus.Queue()
-        self._stop = threading.Event()
-        self._thread = threading.Thread(
-            target=_play, args=(self._queue, self._stream, self._stop), daemon=True
-        )
-        self._thread.start()
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self._stop.set()
-        self._thread.join()
-        self._stream.close()
-        self._stream = None
-        self._queue = None
-        self._thread = None
-        self._stop = None
-
-    async def play(self, data):
-        return await self._queue.async_q.put(data)
-
-    def stop(self):
-        if self._queue and self._queue.async_q:
-            while not self._queue.async_q.empty():
-                try:
-                    self._queue.async_q.get_nowait()
-                except janus.QueueEmpty:
-                    break
-
-
-def _play(audio_out, stream, stop):
-    while not stop.is_set():
-        try:
-            data = audio_out.sync_q.get(True, 0.05)
-            stream.write(data)
-        except queue.Empty:
-            pass
+            # No need to call cleanup since we're not using local audio devices anymore
 
 
 # Global voice agent instance
@@ -1001,35 +859,13 @@ def index():
 
 @app.route("/api/devices", methods=["GET"])
 def get_audio_devices():
-    try:
-        p = pyaudio.PyAudio()
-        input_devices = []
-        output_devices = []
-        
-        for i in range(p.get_device_count()):
-            device_info = p.get_device_info_by_index(i)
-            device = {
-                "index": i,
-                "name": device_info.get("name"),
-                "deviceId": device_info.get("deviceId", i)
-            }
-            
-            if device_info.get("maxInputChannels") > 0:
-                input_devices.append(device)
-                
-            if device_info.get("maxOutputChannels") > 0:
-                output_devices.append(device)
-                
-        p.terminate()
-        
-        return jsonify({
-            "input": input_devices,
-            "output": output_devices
-        })
-    except Exception as e:
-        logger.error(f"Error getting audio devices: {e}")
-        logger.error(traceback.format_exc())
-        return jsonify({"error": str(e)}), 500
+    # For Ngrok deployment, we don't need to return server-side devices
+    # The client will use the browser's enumerateDevices API
+    return jsonify({
+        "message": "For remote access, audio devices are detected in the browser",
+        "input": [{"index": 0, "name": "Default Microphone", "deviceId": "default"}],
+        "output": [{"index": 0, "name": "Default Speaker", "deviceId": "default"}]
+    })
 
 
 @socketio.on("start_voice_agent")
@@ -1037,9 +873,6 @@ def handle_start_voice_agent(data=None):
     global voice_agent
     if voice_agent is None:
         voice_agent = VoiceAgent()
-        if data:
-            voice_agent.input_device_id = data.get("inputDeviceId")
-            voice_agent.output_device_id = data.get("outputDeviceId")
         # Start the voice agent in a background thread
         socketio.start_background_task(target=run_async_voice_agent)
 
