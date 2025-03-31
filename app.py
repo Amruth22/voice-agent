@@ -7,7 +7,7 @@ import logging
 import threading
 import queue
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pyaudio
 import janus
 import base64
@@ -51,51 +51,62 @@ USER_AUDIO_SAMPLES_PER_CHUNK = round(USER_AUDIO_SAMPLE_RATE * USER_AUDIO_SECS_PE
 
 AGENT_AUDIO_SAMPLE_RATE = 16000
 AGENT_AUDIO_BYTES_PER_SEC = 2 * AGENT_AUDIO_SAMPLE_RATE
-
+name="Aamruth"
+email='chatgptplus1999@gmail.com'
 # Template for the prompt that will be formatted with current date
-PROMPT_TEMPLATE = """You are a friendly and professional appointment scheduler. Your role is to assist customers in scheduling appointments in Google Calendar.
+PROMPT_TEMPLATE = """You are a friendly and professional real estate appointment scheduler for Premium Properties. Your role is to assist potential buyers in scheduling property viewings in Google Calendar.
 
 CURRENT DATE AND TIME CONTEXT:
 Today is {current_date}. Use this as context when discussing appointments. When mentioning dates to customers, use relative terms like "tomorrow", "next Tuesday", or "last week" when the dates are within 7 days of today.
+
+CUSTOMER INFORMATION:
+The customer you're speaking with is {name}, and their email is {email}. Make sure to acknowledge this information and confirm it early in the conversation.
 
 PERSONALITY & TONE:
 - Be warm, professional, and conversational
 - Use natural, flowing speech (avoid bullet points or listing)
 - Show empathy and patience
-- Collect all necessary information for scheduling an appointment
+- Sound enthusiastic about the property
+- Ask whether they're interested in purchasing the property before scheduling
+
+CONVERSATION FLOW:
+1. Greet the customer by name and introduce yourself as a real estate scheduling assistant
+2. Ask about which property they're interested in viewing (suggest a luxury property if they don't specify)
+3. Ask if they're interested in purchasing the property
+4. Only if they express interest in buying, proceed to scheduling
+5. Check availability and offer time slots
+6. Confirm the appointment details
 
 INFORMATION TO COLLECT:
-- Customer name
-- Customer email (required for calendar invitation)
-- Customer phone number (optional)
-- Appointment type (Consultation, Follow-up, Review, Planning)
-- Preferred date and time for the appointment
+- Property of interest (if not specified, suggest "our luxury beachfront villa in Malibu")
+- Confirmation of purchase interest
+- Preferred date and time for the viewing
 
 FUNCTION RESPONSES:
 When receiving function results, format responses naturally:
 
 1. For available slots:
-   - "I have a few openings next week. Would you prefer Tuesday at 2 PM or Wednesday at 3 PM?"
+   - "I have a few openings next week to view the property. Would you prefer Tuesday at 2 PM or Wednesday at 3 PM?"
 
 2. For appointment confirmation:
-   - "Great! I've scheduled your [appointment type] for [date] at [time]. You'll receive an email confirmation shortly."
+   - "Great! I've scheduled your property viewing for [date] at [time]. You'll receive an email confirmation shortly."
 
 3. For errors:
    - Never expose technical details
    - Say something like "I'm having trouble accessing the calendar right now" or "Could you please try again?"
 
 EXAMPLES OF GOOD RESPONSES:
-✓ "I'd be happy to schedule an appointment for you. Could I get your name and email address?"
-✓ "I see you'd like a consultation. Let me check what times are available next week."
-✓ "I've found a few available slots. Would Tuesday at 2 PM work for you?"
+✓ "Hello {name}! I understand you're interested in our beachfront property. Are you considering purchasing it?"
+✓ "Before we schedule a viewing, may I ask if you're looking to buy this property or just exploring options?"
+✓ "Since you're interested in purchasing, let me check what viewing times are available next week."
+✓ "I've found a few available slots to view the property. Would Tuesday at 2 PM work for you?"
 
 FILLER PHRASES:
 When you need to indicate you're looking something up, use phrases like:
-- "Let me check the calendar for available slots..."
-- "One moment while I schedule that appointment..."
+- "Let me check the viewing calendar for available slots..."
+- "One moment while I schedule that property viewing..."
 - "I'm checking availability for that date..."
 """
-
 # Voice agent settings
 VOICE = "aura-asteria-en"
 
@@ -224,10 +235,14 @@ class CustomerData:
 # Helper function to ensure RFC3339 format for dates
 def ensure_rfc3339_format(date_string):
     """Ensure the date string is in RFC3339 format with timezone"""
+    # Make sure it has time component
+    if 'T' not in date_string:
+        date_string = f"{date_string}T00:00:00"
+
     # If already has timezone info (Z or +/-), return as is
     if date_string.endswith('Z') or '+' in date_string[10:] or '-' in date_string[10:]:
         return date_string
-    
+
     # Otherwise, add 'Z' for UTC
     return date_string + 'Z'
 
@@ -300,41 +315,42 @@ class GoogleCalendarScheduler:
     async def get_available_slots(self, start_date, end_date=None, calendar_id='primary'):
         """Get available appointment slots"""
         logger.info(f"Getting available slots from {start_date} to {end_date or 'week later'}")
-        
+
         if not self.service:
             logger.info("No service, authenticating")
             if not self.authenticate():
                 logger.error("Failed to authenticate with Google Calendar")
                 return {"error": "Failed to authenticate with Google Calendar"}
-        
+
         if not end_date:
-            end_date = (datetime.fromisoformat(start_date) + timedelta(days=7)).isoformat()
+            # Make sure to create a datetime with time component
+            end_date = (datetime.fromisoformat(start_date.replace('Z', '+00:00') if start_date.endswith('Z') else start_date) + timedelta(days=7)).isoformat()
             logger.info(f"End date not provided, using {end_date}")
-        
+
         # Ensure dates are in RFC3339 format with timezone
         start_date_rfc = ensure_rfc3339_format(start_date)
         end_date_rfc = ensure_rfc3339_format(end_date)
-        
+
         logger.info(f"Using RFC3339 dates: {start_date_rfc} to {end_date_rfc}")
-        
+
         # Get busy times from calendar
         body = {
             "timeMin": start_date_rfc,
             "timeMax": end_date_rfc,
             "items": [{"id": calendar_id}]
         }
-        
+
         try:
             logger.info(f"Querying freebusy with body: {body}")
             events_result = self.service.freebusy().query(body=body).execute()
             busy_times = events_result['calendars'][calendar_id]['busy']
             logger.info(f"Found {len(busy_times)} busy times")
-            
+
             # Generate all possible slots (9 AM to 5 PM, 1-hour slots)
             all_slots = []
             current = datetime.fromisoformat(start_date.replace('Z', '+00:00') if start_date.endswith('Z') else start_date)
             end = datetime.fromisoformat(end_date.replace('Z', '+00:00') if end_date.endswith('Z') else end_date)
-            
+
             while current <= end:
                 if current.hour >= 9 and current.hour < 17:
                     # Skip weekends
@@ -342,31 +358,37 @@ class GoogleCalendarScheduler:
                         slot_time = current.isoformat()
                         all_slots.append(slot_time)
                 current += timedelta(hours=1)
-            
+
             logger.info(f"Generated {len(all_slots)} possible slots")
-            
+
             # Filter out busy slots
             available_slots = []
             for slot in all_slots:
                 slot_dt = datetime.fromisoformat(slot)
                 slot_end = (slot_dt + timedelta(hours=1)).isoformat()
-                
+
+                # Convert to UTC if needed (make sure both are aware datetimes)
+                if not slot.endswith('Z') and not '+' in slot:
+                    # Make slot_dt timezone-aware (assuming UTC)
+                    slot_dt = slot_dt.replace(tzinfo=timezone.utc)
+
                 is_available = True
                 for busy in busy_times:
                     busy_start = datetime.fromisoformat(busy['start'].replace('Z', '+00:00'))
                     busy_end = datetime.fromisoformat(busy['end'].replace('Z', '+00:00'))
-                    
+
+                    # Now both are timezone-aware, comparison will work
                     if (slot_dt >= busy_start and slot_dt < busy_end) or \
-                       (slot_dt < busy_start and datetime.fromisoformat(slot_end) > busy_start):
+                    (slot_dt < busy_start and datetime.fromisoformat(slot_end).replace(tzinfo=timezone.utc) > busy_start):
                         is_available = False
                         break
-                
+
                 if is_available:
                     available_slots.append(slot)
-            
+
             logger.info(f"Found {len(available_slots)} available slots")
             return {"available_slots": available_slots}
-            
+
         except Exception as e:
             logger.error(f"Error getting available slots: {e}")
             logger.error(traceback.format_exc())
@@ -537,8 +559,11 @@ class VoiceAgent:
         try:
             # Format the prompt with the current date
             current_date = datetime.now().strftime("%A, %B %d, %Y")
-            formatted_prompt = PROMPT_TEMPLATE.format(current_date=current_date)
-            
+            formatted_prompt = PROMPT_TEMPLATE.format(
+            current_date=current_date,
+            name=name,  # Using the global name variable
+            email=email  # Using the global email variable
+        )
             # Create settings dictionary
             settings = {
                 "type": "SettingsConfiguration",
@@ -567,7 +592,7 @@ class VoiceAgent:
                     "messages": [
                         {
                             "role": "assistant",
-                            "content": "Hello! I'm your appointment scheduling assistant. How can I help you today?",
+                            "content": f"Hello {name}! I'm your appointment scheduling assistant. How can I help you today?",
                         }
                     ],
                     "replay": True,
