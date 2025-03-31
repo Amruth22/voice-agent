@@ -12,11 +12,9 @@ const inputDeviceSelect = document.getElementById('inputDevice');
 const outputDeviceSelect = document.getElementById('outputDevice');
 const logContainer = document.getElementById('logContainer');
 const appointmentDetails = document.getElementById('appointmentDetails');
-const agentAudio = document.getElementById('agentAudio');
 
 // State variables
 let isAgentRunning = false;
-let isAgentSpeaking = false;
 let typingIndicator = null;
 
 // Initialize the page
@@ -26,6 +24,10 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // Set up event listeners
     setupEventListeners();
+    
+    // Add Vercel deployment notice
+    addLogEntry('Running on Vercel deployment (limited functionality)');
+    addLogEntry('Microphone functionality is disabled in this version');
 });
 
 // Load available audio devices
@@ -53,7 +55,11 @@ function loadAudioDevices() {
                 outputDeviceSelect.appendChild(option);
             });
             
-            addLogEntry('Audio devices loaded successfully');
+            addLogEntry('Audio devices loaded (mock devices for Vercel)');
+            
+            // Disable microphone toggle in Vercel deployment
+            micToggle.disabled = true;
+            micToggle.checked = false;
         })
         .catch(error => {
             addLogEntry(`Error loading audio devices: ${error.message}`, 'error');
@@ -88,12 +94,6 @@ function setupEventListeners() {
         }
     });
     
-    // Microphone toggle
-    micToggle.addEventListener('change', () => {
-        // This will be handled by the voice agent
-        addLogEntry(`Microphone ${micToggle.checked ? 'enabled' : 'disabled'}`);
-    });
-    
     // Socket.IO event listeners
     setupSocketListeners();
 }
@@ -109,16 +109,13 @@ function setupSocketListeners() {
         }
     });
     
-    // Audio chunks
-    socket.on('audio_chunk', (data) => {
-        if (!isAgentSpeaking) {
-            isAgentSpeaking = true;
-            updateSpeakingIndicator(true);
+    // Typing indicator
+    socket.on('typing_indicator', (data) => {
+        if (data.typing) {
+            showTypingIndicator();
+        } else {
+            removeTypingIndicator();
         }
-        
-        // Play audio
-        const audioData = base64ToArrayBuffer(data.audio);
-        playAudioChunk(audioData);
     });
     
     // Log messages
@@ -142,20 +139,13 @@ function setupSocketListeners() {
 
 // Start the voice agent
 function startVoiceAgent() {
-    const inputDeviceId = inputDeviceSelect.value;
-    const outputDeviceId = outputDeviceSelect.value;
-    
-    socket.emit('start_voice_agent', {
-        inputDeviceId,
-        outputDeviceId
-    });
+    socket.emit('start_voice_agent');
     
     isAgentRunning = true;
     startButton.disabled = true;
     stopButton.disabled = false;
-    micToggle.checked = true;
     
-    addLogEntry('Voice agent started');
+    addLogEntry('Voice agent started (text-only mode for Vercel)');
 }
 
 // Stop the voice agent
@@ -163,11 +153,8 @@ function stopVoiceAgent() {
     socket.emit('stop_voice_agent');
     
     isAgentRunning = false;
-    isAgentSpeaking = false;
     startButton.disabled = false;
     stopButton.disabled = true;
-    micToggle.checked = false;
-    updateSpeakingIndicator(false);
     
     addLogEntry('Voice agent stopped');
 }
@@ -223,15 +210,7 @@ function addAssistantMessage(message) {
     
     const contentElement = document.createElement('div');
     contentElement.className = 'message-content';
-    
-    // Add speaking indicator if agent is speaking
-    if (isAgentSpeaking) {
-        const speakingIndicator = document.createElement('span');
-        speakingIndicator.className = 'speaking-indicator';
-        contentElement.appendChild(speakingIndicator);
-    }
-    
-    contentElement.appendChild(document.createTextNode(message));
+    contentElement.textContent = message;
     
     const timeElement = document.createElement('div');
     timeElement.className = 'message-time';
@@ -270,33 +249,6 @@ function removeTypingIndicator() {
     if (typingIndicator && typingIndicator.parentNode === chatContainer) {
         chatContainer.removeChild(typingIndicator);
         typingIndicator = null;
-    }
-}
-
-// Update speaking indicator
-function updateSpeakingIndicator(isSpeaking) {
-    isAgentSpeaking = isSpeaking;
-    
-    // Update the last assistant message if it exists
-    const assistantMessages = document.querySelectorAll('.message.assistant');
-    if (assistantMessages.length > 0) {
-        const lastMessage = assistantMessages[assistantMessages.length - 1];
-        const contentElement = lastMessage.querySelector('.message-content');
-        
-        if (isSpeaking) {
-            // Add indicator if not present
-            if (!contentElement.querySelector('.speaking-indicator')) {
-                const indicator = document.createElement('span');
-                indicator.className = 'speaking-indicator';
-                contentElement.insertBefore(indicator, contentElement.firstChild);
-            }
-        } else {
-            // Remove indicator if present
-            const indicator = contentElement.querySelector('.speaking-indicator');
-            if (indicator) {
-                contentElement.removeChild(indicator);
-            }
-        }
     }
 }
 
@@ -374,36 +326,6 @@ function addLogEntry(message, type = 'info') {
     
     logContainer.appendChild(logEntry);
     logContainer.scrollTop = logContainer.scrollHeight;
-}
-
-// Convert base64 to ArrayBuffer
-function base64ToArrayBuffer(base64) {
-    const binaryString = window.atob(base64);
-    const len = binaryString.length;
-    const bytes = new Uint8Array(len);
-    for (let i = 0; i < len; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
-    }
-    return bytes.buffer;
-}
-
-// Play audio chunk
-function playAudioChunk(audioData) {
-    const blob = new Blob([audioData], { type: 'audio/wav' });
-    const url = URL.createObjectURL(blob);
-    
-    agentAudio.src = url;
-    agentAudio.play()
-        .catch(error => {
-            addLogEntry(`Error playing audio: ${error.message}`, 'error');
-        });
-    
-    // Clean up URL object after playing
-    agentAudio.onended = () => {
-        URL.revokeObjectURL(url);
-        isAgentSpeaking = false;
-        updateSpeakingIndicator(false);
-    };
 }
 
 // Get current time in HH:MM:SS format
