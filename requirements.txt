@@ -3,8 +3,7 @@ flask-socketio>=5.0.0
 google-api-python-client>=2.0.0
 google-auth-httplib2>=0.1.0
 google-auth-oauthlib>=0.4.0
-# Use a fallback approach for PyAudio
-# The app has a fallback mechanism if PyAudio fails to install
+# Skip PyAudio on Linux (Heroku) - the app has a fallback mechanism
 pyaudio>=0.2.11; platform_system != "Linux"
 websockets==10.4
 janus>=1.0.0
