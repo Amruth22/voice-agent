@@ -95,6 +95,14 @@ This repository contains a voice agent application that collects customer detail
 
 ## Troubleshooting
 
+### Python Version Issues
+
+This application is configured to use Python 3.12 via the `.python-version` file. If you encounter Python version issues:
+
+1. Make sure the `.python-version` file exists and contains only `3.12`
+2. Ensure there is no `runtime.txt` file in your repository
+3. Check Heroku logs for any Python version related errors
+
 ### PyAudio Issues
 
 The application has been configured with a fallback mechanism for PyAudio, so it should work even if PyAudio is not available. The app will automatically detect if PyAudio is missing and will switch to text-only mode.
@@ -167,7 +175,8 @@ To run the application locally:
 
 - `app.py` - Flask web application with SocketIO for real-time communication
 - `Procfile` - Heroku process file that specifies how to run the application
-- `.python-version` - Specifies the Python version for Heroku
+- `.python-version` - Specifies Python 3.12 for Heroku
+- `.slugignore` - Tells Heroku to ignore certain files
 - `apt-packages` - Lists system dependencies required by PyAudio
 - `requirements.txt` - Python dependencies
 - `templates/` - HTML templates for the web interface
