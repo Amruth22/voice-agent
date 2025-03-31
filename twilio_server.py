@@ -16,6 +16,7 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 import secrets
 import numpy as np
+import time
 
 # Load environment variables from .env file
 load_dotenv()
@@ -47,8 +48,8 @@ name = os.environ.get("CUSTOMER_NAME", "Customer")
 email = os.environ.get("CUSTOMER_EMAIL", "customer@example.com")
 
 # Heartbeat settings
-HEARTBEAT_INTERVAL = 5  # Send silent audio every 5 seconds if no user audio
-LAST_AUDIO_SENT_THRESHOLD = 8  # Consider connection stale after 8 seconds of no audio
+HEARTBEAT_INTERVAL = int(os.environ.get("HEARTBEAT_INTERVAL", "5"))  # Send silent audio every 5 seconds if no user audio
+LAST_AUDIO_SENT_THRESHOLD = int(os.environ.get("LAST_AUDIO_SENT_THRESHOLD", "8"))  # Consider connection stale after 8 seconds of no audio
 
 # Template for the prompt that will be formatted with current date
 PROMPT_TEMPLATE = """You are a friendly and professional real estate appointment scheduler for Premium Properties. Your role is to assist potential buyers in scheduling property viewings in Google Calendar.
@@ -556,7 +557,8 @@ async def twilio_handler(twilio_ws):
     customer_data = CustomerData()
     
     # Use mock scheduler if USE_MOCK_CALENDAR is set to True
-    if os.environ.get("USE_MOCK_CALENDAR", "false").lower() == "true":
+    use_mock = os.environ.get("USE_MOCK_CALENDAR", "false").lower() == "true"
+    if use_mock:
         logger.info("Using mock calendar scheduler")
         calendar_scheduler = MockCalendarScheduler()
     else:
@@ -870,10 +872,6 @@ async def router(websocket, path):
 
 def main():
     """Main function to start the WebSocket server"""
-    # Import time for the heartbeat mechanism
-    global time
-    import time
-    
     # Check if SSL is enabled
     use_ssl = os.environ.get("USE_SSL", "false").lower() == "true"
     host = os.environ.get("HOST", "localhost")
@@ -915,7 +913,8 @@ if __name__ == "__main__":
         print("=" * 60 + "\n")
     
     # Check if credentials.json exists
-    if not os.path.exists('credentials.json') and os.environ.get("USE_MOCK_CALENDAR", "false").lower() != "true":
+    use_mock = os.environ.get("USE_MOCK_CALENDAR", "false").lower() == "true"
+    if not os.path.exists('credentials.json') and not use_mock:
         print("\n" + "=" * 60)
         print("⚠️  WARNING: credentials.json file not found!")
         print("Google Calendar integration will not work without this file.")
@@ -927,7 +926,7 @@ if __name__ == "__main__":
         print("=" * 60 + "\n")
     
     # Check if using mock calendar
-    if os.environ.get("USE_MOCK_CALENDAR", "false").lower() == "true":
+    if use_mock:
         print("\n" + "=" * 60)
         print("🔄 Using MOCK calendar scheduler (no Google Calendar API calls)")
         print("=" * 60 + "\n")
