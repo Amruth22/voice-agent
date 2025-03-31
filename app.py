@@ -8,8 +8,6 @@ import threading
 import queue
 import time
 from datetime import datetime, timedelta, timezone
-import pyaudio
-import janus
 import base64
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -26,6 +24,60 @@ import eventlet
 
 # Patch for eventlet with asyncio
 eventlet.monkey_patch()
+
+# Try to import PyAudio, but provide a fallback if it's not available
+try:
+    import pyaudio
+    PYAUDIO_AVAILABLE = True
+    logger.info("PyAudio is available")
+except ImportError:
+    PYAUDIO_AVAILABLE = False
+    logger.warning("PyAudio is not available. Audio functionality will be limited.")
+    # Create a mock PyAudio class for compatibility
+    class MockPyAudio:
+        def __init__(self):
+            pass
+        
+        def open(self, *args, **kwargs):
+            class MockStream:
+                def start_stream(self):
+                    pass
+                def stop_stream(self):
+                    pass
+                def close(self):
+                    pass
+            return MockStream()
+        
+        def get_host_api_info_by_index(self, *args, **kwargs):
+            return {"deviceCount": 0}
+        
+        def get_device_info_by_host_api_device_index(self, *args, **kwargs):
+            return {"maxInputChannels": 0, "name": "Mock Device"}
+        
+        def get_device_count(self):
+            return 0
+        
+        def terminate(self):
+            pass
+    
+    # Replace pyaudio with our mock if it's not available
+    pyaudio = MockPyAudio()
+
+try:
+    import janus
+except ImportError:
+    # Create a mock Janus Queue for compatibility
+    class MockJanus:
+        class Queue:
+            def __init__(self):
+                self.async_q = asyncio.Queue()
+                self.sync_q = queue.Queue()
+        
+        @staticmethod
+        def Queue():
+            return MockJanus.Queue()
+    
+    janus = MockJanus
 
 # Load environment variables from .env file
 load_dotenv()
@@ -669,6 +721,10 @@ class VoiceAgent:
         return (input_data, pyaudio.paContinue)
 
     async def start_microphone(self):
+        if not PYAUDIO_AVAILABLE:
+            logger.warning("PyAudio is not available. Using mock microphone.")
+            return None, None
+            
         try:
             self.audio = pyaudio.PyAudio()
 
@@ -693,7 +749,8 @@ class VoiceAgent:
                         input_device_index = i
 
             if input_device_index is None:
-                raise Exception("No input device found")
+                logger.warning("No input device found. Using mock microphone.")
+                return None, None
 
             self.stream = self.audio.open(
                 format=pyaudio.paInt16,
@@ -711,7 +768,7 @@ class VoiceAgent:
             logger.error(f"Error starting microphone: {e}")
             if self.audio:
                 self.audio.terminate()
-            raise
+            return None, None
 
     def cleanup(self):
         """Clean up audio resources"""
@@ -888,8 +945,9 @@ class VoiceAgent:
                         audio_b64 = base64.b64encode(message).decode('utf-8')
                         socketio.emit("audio_chunk", {"audio": audio_b64})
                         
-                        # Also play through speaker
-                        await self.speaker.play(message)
+                        # Also play through speaker if available
+                        if PYAUDIO_AVAILABLE:
+                            await self.speaker.play(message)
 
         except Exception as e:
             logger.error(f"Error in receiver: {e}")
@@ -922,39 +980,51 @@ class Speaker:
         self._stop = None
 
     def __enter__(self):
-        audio = pyaudio.PyAudio()
-        self._stream = audio.open(
-            format=pyaudio.paInt16,
-            channels=1,
-            rate=AGENT_AUDIO_SAMPLE_RATE,
-            input=False,
-            output=True,
-        )
-        self._queue = janus.Queue()
-        self._stop = threading.Event()
-        self._thread = threading.Thread(
-            target=_play, args=(self._queue, self._stream, self._stop), daemon=True
-        )
-        self._thread.start()
+        if not PYAUDIO_AVAILABLE:
+            return self
+            
+        try:
+            audio = pyaudio.PyAudio()
+            self._stream = audio.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=AGENT_AUDIO_SAMPLE_RATE,
+                input=False,
+                output=True,
+            )
+            self._queue = janus.Queue()
+            self._stop = threading.Event()
+            self._thread = threading.Thread(
+                target=_play, args=(self._queue, self._stream, self._stop), daemon=True
+            )
+            self._thread.start()
+        except Exception as e:
+            logger.error(f"Error initializing speaker: {e}")
+        return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        self._stop.set()
-        self._thread.join()
-        self._stream.close()
+        if self._stop:
+            self._stop.set()
+        if self._thread:
+            self._thread.join()
+        if self._stream:
+            self._stream.close()
         self._stream = None
         self._queue = None
         self._thread = None
         self._stop = None
 
     async def play(self, data):
-        return await self._queue.async_q.put(data)
+        if self._queue and hasattr(self._queue, 'async_q'):
+            return await self._queue.async_q.put(data)
+        return None
 
     def stop(self):
-        if self._queue and self._queue.async_q:
+        if self._queue and hasattr(self._queue, 'async_q'):
             while not self._queue.async_q.empty():
                 try:
                     self._queue.async_q.get_nowait()
-                except janus.QueueEmpty:
+                except Exception:
                     break
 
 
@@ -965,6 +1035,9 @@ def _play(audio_out, stream, stop):
             stream.write(data)
         except queue.Empty:
             pass
+        except Exception as e:
+            logger.error(f"Error playing audio: {e}")
+            break
 
 
 # Global voice agent instance
@@ -1028,11 +1101,24 @@ def health_check():
     return jsonify({
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "version": "1.0.0"
+        "version": "1.0.0",
+        "pyaudio_available": PYAUDIO_AVAILABLE
     })
 
 @app.route("/api/devices", methods=["GET"])
 def get_audio_devices():
+    if not PYAUDIO_AVAILABLE:
+        # Return mock devices if PyAudio is not available
+        return jsonify({
+            "input": [
+                {"index": 0, "name": "Default Microphone (Mock)", "deviceId": 0}
+            ],
+            "output": [
+                {"index": 0, "name": "Default Speaker (Mock)", "deviceId": 0}
+            ],
+            "mock": True
+        })
+        
     try:
         p = pyaudio.PyAudio()
         input_devices = []
@@ -1056,12 +1142,22 @@ def get_audio_devices():
         
         return jsonify({
             "input": input_devices,
-            "output": output_devices
+            "output": output_devices,
+            "mock": False
         })
     except Exception as e:
         logger.error(f"Error getting audio devices: {e}")
         logger.error(traceback.format_exc())
-        return jsonify({"error": str(e)}), 500
+        return jsonify({
+            "input": [
+                {"index": 0, "name": "Default Microphone (Error)", "deviceId": 0}
+            ],
+            "output": [
+                {"index": 0, "name": "Default Speaker (Error)", "deviceId": 0}
+            ],
+            "mock": True,
+            "error": str(e)
+        })
 
 
 @socketio.on("start_voice_agent")
@@ -1119,6 +1215,7 @@ if __name__ == "__main__":
     
     # Print Python version for debugging
     print(f"Python version: {sys.version}")
+    print(f"PyAudio available: {PYAUDIO_AVAILABLE}")
     
     # Check if Deepgram API key is set
     if not os.environ.get("DEEPGRAM_API_KEY"):
