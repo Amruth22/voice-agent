@@ -18,6 +18,8 @@ const agentAudio = document.getElementById('agentAudio');
 let isAgentRunning = false;
 let isAgentSpeaking = false;
 let typingIndicator = null;
+let audioErrorsReported = false;
+let audioEnabled = true;
 
 // Initialize the page
 document.addEventListener('DOMContentLoaded', () => {
@@ -26,7 +28,28 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // Set up event listeners
     setupEventListeners();
+    
+    // Check if we're running on Heroku
+    checkEnvironment();
 });
+
+// Check if we're running on Heroku or another environment
+function checkEnvironment() {
+    // Check if we're running on Heroku by looking at the hostname
+    const isHeroku = window.location.hostname.includes('herokuapp.com');
+    
+    if (isHeroku) {
+        addLogEntry('Running on Heroku - audio playback may be limited', 'warning');
+        // Add a notice at the top of the chat
+        const noticeElement = document.createElement('div');
+        noticeElement.className = 'alert alert-info mb-3';
+        noticeElement.innerHTML = `
+            <strong>Note:</strong> This application is running on Heroku with limited audio capabilities. 
+            Text-based interaction is fully supported, but voice interaction may not work properly.
+        `;
+        chatContainer.prepend(noticeElement);
+    }
+}
 
 // Load available audio devices
 function loadAudioDevices() {
@@ -53,7 +76,21 @@ function loadAudioDevices() {
                 outputDeviceSelect.appendChild(option);
             });
             
-            addLogEntry('Audio devices loaded successfully');
+            // Check if these are mock devices
+            if (data.mock) {
+                addLogEntry('Using mock audio devices - audio functionality will be limited', 'warning');
+                micToggle.disabled = true;
+                micToggle.checked = false;
+                
+                // Add a note to the device selects
+                const mockNote = document.createElement('small');
+                mockNote.className = 'text-muted d-block mt-2';
+                mockNote.textContent = 'Audio devices not available in this environment';
+                inputDeviceSelect.parentNode.appendChild(mockNote.cloneNode(true));
+                outputDeviceSelect.parentNode.appendChild(mockNote);
+            } else {
+                addLogEntry('Audio devices loaded successfully');
+            }
         })
         .catch(error => {
             addLogEntry(`Error loading audio devices: ${error.message}`, 'error');
@@ -94,8 +131,29 @@ function setupEventListeners() {
         addLogEntry(`Microphone ${micToggle.checked ? 'enabled' : 'disabled'}`);
     });
     
+    // Audio error handling
+    agentAudio.addEventListener('error', (e) => {
+        handleAudioError(e);
+    });
+    
     // Socket.IO event listeners
     setupSocketListeners();
+}
+
+// Handle audio errors gracefully
+function handleAudioError(error) {
+    // Only report audio errors once to avoid flooding the logs
+    if (!audioErrorsReported) {
+        audioErrorsReported = true;
+        audioEnabled = false;
+        
+        // Log the error once
+        addLogEntry('Audio playback not available in this environment. Using text-only mode.', 'warning');
+        
+        // Disable the audio toggle
+        micToggle.disabled = true;
+        micToggle.checked = false;
+    }
 }
 
 // Set up Socket.IO event listeners
@@ -116,9 +174,12 @@ function setupSocketListeners() {
             updateSpeakingIndicator(true);
         }
         
-        // Play audio
-        const audioData = base64ToArrayBuffer(data.audio);
-        playAudioChunk(audioData);
+        // Only try to play audio if it's enabled
+        if (audioEnabled) {
+            // Play audio
+            const audioData = base64ToArrayBuffer(data.audio);
+            playAudioChunk(audioData);
+        }
     });
     
     // Log messages
@@ -153,7 +214,11 @@ function startVoiceAgent() {
     isAgentRunning = true;
     startButton.disabled = true;
     stopButton.disabled = false;
-    micToggle.checked = true;
+    
+    // Only enable microphone toggle if audio is available
+    if (!micToggle.disabled) {
+        micToggle.checked = true;
+    }
     
     addLogEntry('Voice agent started');
 }
@@ -166,7 +231,12 @@ function stopVoiceAgent() {
     isAgentSpeaking = false;
     startButton.disabled = false;
     stopButton.disabled = true;
-    micToggle.checked = false;
+    
+    // Only change microphone toggle if it's not disabled
+    if (!micToggle.disabled) {
+        micToggle.checked = false;
+    }
+    
     updateSpeakingIndicator(false);
     
     addLogEntry('Voice agent stopped');
@@ -224,8 +294,8 @@ function addAssistantMessage(message) {
     const contentElement = document.createElement('div');
     contentElement.className = 'message-content';
     
-    // Add speaking indicator if agent is speaking
-    if (isAgentSpeaking) {
+    // Add speaking indicator if agent is speaking and audio is enabled
+    if (isAgentSpeaking && audioEnabled) {
         const speakingIndicator = document.createElement('span');
         speakingIndicator.className = 'speaking-indicator';
         contentElement.appendChild(speakingIndicator);
@@ -276,6 +346,9 @@ function removeTypingIndicator() {
 // Update speaking indicator
 function updateSpeakingIndicator(isSpeaking) {
     isAgentSpeaking = isSpeaking;
+    
+    // Only update speaking indicator if audio is enabled
+    if (!audioEnabled) return;
     
     // Update the last assistant message if it exists
     const assistantMessages = document.querySelectorAll('.message.assistant');
@@ -351,7 +424,7 @@ function updateAppointmentDetails(data) {
         </div>
     `;
     
-    addLogEntry(`Appointment scheduled for ${customer.name} on ${formattedTime}`);
+    addLogEntry(`Appointment scheduled for ${customer.name} on ${formattedTime}`, 'success');
 }
 
 // Add a log entry
@@ -389,21 +462,30 @@ function base64ToArrayBuffer(base64) {
 
 // Play audio chunk
 function playAudioChunk(audioData) {
-    const blob = new Blob([audioData], { type: 'audio/wav' });
-    const url = URL.createObjectURL(blob);
+    // Skip audio playback if it's disabled
+    if (!audioEnabled) return;
     
-    agentAudio.src = url;
-    agentAudio.play()
-        .catch(error => {
-            addLogEntry(`Error playing audio: ${error.message}`, 'error');
-        });
-    
-    // Clean up URL object after playing
-    agentAudio.onended = () => {
-        URL.revokeObjectURL(url);
-        isAgentSpeaking = false;
-        updateSpeakingIndicator(false);
-    };
+    try {
+        const blob = new Blob([audioData], { type: 'audio/wav' });
+        const url = URL.createObjectURL(blob);
+        
+        agentAudio.src = url;
+        agentAudio.play()
+            .catch(error => {
+                // Handle play errors gracefully
+                handleAudioError(error);
+            });
+        
+        // Clean up URL object after playing
+        agentAudio.onended = () => {
+            URL.revokeObjectURL(url);
+            isAgentSpeaking = false;
+            updateSpeakingIndicator(false);
+        };
+    } catch (error) {
+        // Handle any other errors in audio playback
+        handleAudioError(error);
+    }
 }
 
 // Get current time in HH:MM:SS format
