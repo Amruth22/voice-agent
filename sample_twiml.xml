@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say language="en">This call may be monitored or recorded.</Say>
+    <Connect>
+        <Stream url="wss://your-server-url.com/twilio" />
+    </Connect>
+</Response>
