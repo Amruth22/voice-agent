@@ -15,7 +15,6 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 import secrets
-import numpy as np
 import time
 
 # Load environment variables from .env file
@@ -46,10 +45,6 @@ SCOPES = ['https://www.googleapis.com/auth/calendar']
 # Customer information (can be overridden in .env)
 name = os.environ.get("CUSTOMER_NAME", "Customer")
 email = os.environ.get("CUSTOMER_EMAIL", "customer@example.com")
-
-# Heartbeat settings
-HEARTBEAT_INTERVAL = int(os.environ.get("HEARTBEAT_INTERVAL", "5"))  # Send silent audio every 5 seconds if no user audio
-LAST_AUDIO_SENT_THRESHOLD = int(os.environ.get("LAST_AUDIO_SENT_THRESHOLD", "8"))  # Consider connection stale after 8 seconds of no audio
 
 # Template for the prompt that will be formatted with current date
 PROMPT_TEMPLATE = """You are a friendly and professional real estate appointment scheduler for Premium Properties. Your role is to assist potential buyers in scheduling property viewings in Google Calendar.
@@ -518,26 +513,6 @@ class MockCalendarScheduler:
 # Global storage for customer data
 customer_data_store = {}
 
-# Function to generate silent audio frames for heartbeat
-def generate_silent_audio(duration_ms=100, sample_rate=8000):
-    """Generate silent audio data for heartbeat in mulaw format"""
-    # Calculate number of samples
-    num_samples = int(duration_ms * sample_rate / 1000)
-    
-    # Create silent audio (very low amplitude, not completely zero to avoid optimization)
-    silent_audio = np.zeros(num_samples, dtype=np.float32)
-    
-    # Add minimal noise to prevent optimization
-    silent_audio += np.random.normal(0, 0.0001, num_samples)
-    
-    # Convert to mulaw format (8-bit)
-    # This is a simplified mulaw conversion - in production you might want a more accurate implementation
-    silent_pcm = np.sign(silent_audio) * np.log(1 + 255 * np.abs(silent_audio)) / np.log(1 + 255)
-    silent_pcm = (silent_pcm * 127 + 128).astype(np.uint8)
-    
-    # Convert to bytes
-    return silent_pcm.tobytes()
-
 def sts_connect():
     """Connect to Deepgram Voice Agent API"""
     sts_ws = websockets.connect(
@@ -564,9 +539,6 @@ async def twilio_handler(twilio_ws):
     else:
         logger.info("Using Google Calendar scheduler")
         calendar_scheduler = GoogleCalendarScheduler()
-    
-    # Track when we last sent audio to Deepgram
-    last_audio_sent_time = time.time()
 
     async with sts_connect() as sts_ws:
         # Format the prompt with the current date
@@ -619,44 +591,14 @@ async def twilio_handler(twilio_ws):
         else:
             logger.info(f"Received response: {response_json}")
 
-        async def heartbeat():
-            """Send silent audio frames periodically to keep the connection alive"""
-            try:
-                logger.info("Starting heartbeat task")
-                while True:
-                    # Check if we need to send a heartbeat
-                    current_time = time.time()
-                    time_since_last_audio = current_time - last_audio_sent_time
-                    
-                    if time_since_last_audio >= HEARTBEAT_INTERVAL:
-                        # Generate and send silent audio
-                        silent_audio = generate_silent_audio()
-                        logger.info(f"Sending heartbeat audio after {time_since_last_audio:.1f}s of silence")
-                        await sts_ws.send(silent_audio)
-                        nonlocal last_audio_sent_time
-                        last_audio_sent_time = current_time
-                    
-                    # Wait a bit before checking again
-                    await asyncio.sleep(1)
-            except asyncio.CancelledError:
-                logger.info("Heartbeat task cancelled")
-            except Exception as e:
-                logger.error(f"Error in heartbeat task: {e}")
-                logger.error(traceback.format_exc())
-
         async def sts_sender(sts_ws):
             """Send audio from Twilio to Deepgram"""
             logger.info("sts_sender started")
             while True:
                 try:
-                    # Wait for data with a timeout
-                    chunk = await asyncio.wait_for(audio_queue.get(), timeout=0.5)
+                    # Get audio data from queue
+                    chunk = await audio_queue.get()
                     await sts_ws.send(chunk)
-                    nonlocal last_audio_sent_time
-                    last_audio_sent_time = time.time()
-                except asyncio.TimeoutError:
-                    # No data received within timeout, continue the loop
-                    continue
                 except Exception as e:
                     logger.error(f"Error in sts_sender: {e}")
                     break
@@ -838,27 +780,16 @@ async def twilio_handler(twilio_ws):
                     logger.error(f"Error processing Twilio message: {e}")
                     break
 
-        # Start the heartbeat task
-        heartbeat_task = asyncio.create_task(heartbeat())
-        
-        try:
-            # Run all tasks concurrently
-            await asyncio.wait(
-                [
-                    asyncio.ensure_future(sts_sender(sts_ws)),
-                    asyncio.ensure_future(sts_receiver(sts_ws)),
-                    asyncio.ensure_future(twilio_receiver(twilio_ws)),
-                ]
-            )
-        finally:
-            # Cancel the heartbeat task
-            heartbeat_task.cancel()
-            try:
-                await heartbeat_task
-            except asyncio.CancelledError:
-                pass
+        # Run all tasks concurrently
+        await asyncio.wait(
+            [
+                asyncio.ensure_future(sts_sender(sts_ws)),
+                asyncio.ensure_future(sts_receiver(sts_ws)),
+                asyncio.ensure_future(twilio_receiver(twilio_ws)),
+            ]
+        )
             
-            await twilio_ws.close()
+        await twilio_ws.close()
 
 async def router(websocket, path):
     """Route incoming WebSocket connections based on path"""
