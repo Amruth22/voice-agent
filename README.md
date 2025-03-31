@@ -84,6 +84,45 @@ The script will:
 3. Show available time slots from Google Calendar
 4. Schedule the appointment and send an email invitation to the customer
 
+## Deployment Options
+
+### Local Development
+
+Run the application locally as described above for development and testing.
+
+### Ngrok Deployment
+
+For sharing your application with others while maintaining full functionality (including audio):
+
+1. Check out the `ngrok-deployment` branch:
+   ```
+   git checkout ngrok-deployment
+   ```
+
+2. Follow the instructions in [NGROK_DEPLOYMENT.md](NGROK_DEPLOYMENT.md)
+
+3. Use the provided scripts to start the application with Ngrok:
+   ```
+   # On Linux/macOS:
+   ./start_with_ngrok.sh
+   
+   # On Windows:
+   start_with_ngrok.bat
+   ```
+
+This will give you a public URL that you can share with others, while running the application on your local machine with full functionality.
+
+### Heroku Deployment
+
+For a more permanent cloud-based deployment (with some audio limitations):
+
+1. Check out the `heroku-deployment` branch:
+   ```
+   git checkout heroku-deployment
+   ```
+
+2. Follow the instructions in that branch's README.md file
+
 ## Authentication
 
 On first run, the application will open a browser window asking you to authorize it to access your Google Calendar. After authorization, a token will be saved locally for future use.
@@ -96,6 +135,9 @@ On first run, the application will open a browser window asking you to authorize
 - `static/` - CSS, JavaScript, and other static assets
 - `credentials.json` - Google OAuth credentials (you need to provide this)
 - `token.pickle` - Saved authentication token (generated on first run)
+- `NGROK_DEPLOYMENT.md` - Instructions for deploying with Ngrok (in ngrok-deployment branch)
+- `start_with_ngrok.sh` - Shell script to start the app with Ngrok (in ngrok-deployment branch)
+- `start_with_ngrok.bat` - Batch file to start the app with Ngrok on Windows (in ngrok-deployment branch)
 
 ## Future Enhancements
 
