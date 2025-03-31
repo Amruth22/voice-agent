@@ -18,6 +18,11 @@ const agentAudio = document.getElementById('agentAudio');
 let isAgentRunning = false;
 let isAgentSpeaking = false;
 let typingIndicator = null;
+let audioContext = null;
+let audioProcessor = null;
+let audioSource = null;
+let userAudioStream = null;
+let isCapturingAudio = false;
 
 // Initialize the page
 document.addEventListener('DOMContentLoaded', () => {
@@ -26,38 +31,176 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // Set up event listeners
     setupEventListeners();
+    
+    // Check if browser supports getUserMedia
+    checkBrowserSupport();
 });
+
+// Check if browser supports getUserMedia
+function checkBrowserSupport() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        addLogEntry('Your browser does not support microphone access. Text-only mode will be used.', 'warning');
+        micToggle.disabled = true;
+        micToggle.checked = false;
+    } else {
+        addLogEntry('Browser supports microphone access');
+    }
+}
+
+// Request access to user's microphone
+function requestUserMicrophone() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        addLogEntry('Microphone access not supported by your browser', 'error');
+        return Promise.reject(new Error('getUserMedia not supported'));
+    }
+    
+    return navigator.mediaDevices.getUserMedia({ audio: true })
+        .then(stream => {
+            addLogEntry('Microphone access granted', 'success');
+            userAudioStream = stream;
+            return stream;
+        })
+        .catch(error => {
+            addLogEntry(`Microphone access denied: ${error.message}`, 'error');
+            micToggle.checked = false;
+            throw error;
+        });
+}
+
+// Start capturing audio from user's microphone
+function startAudioCapture() {
+    if (!userAudioStream) {
+        addLogEntry('No microphone access. Please enable microphone first.', 'error');
+        return false;
+    }
+    
+    if (isCapturingAudio) {
+        return true; // Already capturing
+    }
+    
+    try {
+        // Create audio context
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        audioSource = audioContext.createMediaStreamSource(userAudioStream);
+        
+        // Create script processor for audio processing
+        audioProcessor = audioContext.createScriptProcessor(4096, 1, 1);
+        
+        // Process audio data
+        audioProcessor.onaudioprocess = function(e) {
+            if (!isAgentRunning || !micToggle.checked) return;
+            
+            // Get audio data from microphone
+            const inputData = e.inputBuffer.getChannelData(0);
+            
+            // Convert to 16-bit PCM (format expected by Deepgram)
+            const pcmData = new Int16Array(inputData.length);
+            for (let i = 0; i < inputData.length; i++) {
+                pcmData[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
+            }
+            
+            // Send to server
+            const buffer = pcmData.buffer;
+            const base64data = arrayBufferToBase64(buffer);
+            socket.emit('audio_data', { audio: base64data });
+        };
+        
+        // Connect nodes
+        audioSource.connect(audioProcessor);
+        audioProcessor.connect(audioContext.destination);
+        
+        isCapturingAudio = true;
+        addLogEntry('Started capturing audio from your microphone', 'success');
+        return true;
+    } catch (error) {
+        addLogEntry(`Error starting audio capture: ${error.message}`, 'error');
+        return false;
+    }
+}
+
+// Stop capturing audio
+function stopAudioCapture() {
+    if (!isCapturingAudio) return;
+    
+    try {
+        if (audioProcessor) {
+            audioProcessor.disconnect();
+            audioProcessor = null;
+        }
+        
+        if (audioSource) {
+            audioSource.disconnect();
+            audioSource = null;
+        }
+        
+        if (audioContext && audioContext.state !== 'closed') {
+            audioContext.close().catch(e => console.error('Error closing audio context:', e));
+            audioContext = null;
+        }
+        
+        isCapturingAudio = false;
+        addLogEntry('Stopped capturing audio from your microphone');
+    } catch (error) {
+        addLogEntry(`Error stopping audio capture: ${error.message}`, 'error');
+    }
+}
 
 // Load available audio devices
 function loadAudioDevices() {
-    fetch('/api/devices')
-        .then(response => response.json())
-        .then(data => {
-            // Clear existing options
-            inputDeviceSelect.innerHTML = '';
-            outputDeviceSelect.innerHTML = '';
-            
-            // Add input devices
-            data.input.forEach(device => {
-                const option = document.createElement('option');
-                option.value = device.deviceId;
-                option.textContent = device.name;
-                inputDeviceSelect.appendChild(option);
+    // For Ngrok deployment, we don't need to load devices from the server
+    // as we'll use the browser's getUserMedia API directly
+    
+    if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
+        navigator.mediaDevices.enumerateDevices()
+            .then(devices => {
+                // Clear existing options
+                inputDeviceSelect.innerHTML = '';
+                outputDeviceSelect.innerHTML = '';
+                
+                // Add default option
+                const defaultInputOption = document.createElement('option');
+                defaultInputOption.value = 'default';
+                defaultInputOption.textContent = 'Default Microphone';
+                inputDeviceSelect.appendChild(defaultInputOption);
+                
+                const defaultOutputOption = document.createElement('option');
+                defaultOutputOption.value = 'default';
+                defaultOutputOption.textContent = 'Default Speaker';
+                outputDeviceSelect.appendChild(defaultOutputOption);
+                
+                // Add input devices
+                const audioInputDevices = devices.filter(device => device.kind === 'audioinput');
+                audioInputDevices.forEach(device => {
+                    const option = document.createElement('option');
+                    option.value = device.deviceId;
+                    option.textContent = device.label || `Microphone ${inputDeviceSelect.options.length}`;
+                    inputDeviceSelect.appendChild(option);
+                });
+                
+                // Add output devices
+                const audioOutputDevices = devices.filter(device => device.kind === 'audiooutput');
+                audioOutputDevices.forEach(device => {
+                    const option = document.createElement('option');
+                    option.value = device.deviceId;
+                    option.textContent = device.label || `Speaker ${outputDeviceSelect.options.length}`;
+                    outputDeviceSelect.appendChild(option);
+                });
+                
+                addLogEntry('Audio devices loaded from browser');
+            })
+            .catch(error => {
+                addLogEntry(`Error enumerating audio devices: ${error.message}`, 'error');
+                
+                // Add default options
+                inputDeviceSelect.innerHTML = '<option value="default">Default Microphone</option>';
+                outputDeviceSelect.innerHTML = '<option value="default">Default Speaker</option>';
             });
-            
-            // Add output devices
-            data.output.forEach(device => {
-                const option = document.createElement('option');
-                option.value = device.deviceId;
-                option.textContent = device.name;
-                outputDeviceSelect.appendChild(option);
-            });
-            
-            addLogEntry('Audio devices loaded successfully');
-        })
-        .catch(error => {
-            addLogEntry(`Error loading audio devices: ${error.message}`, 'error');
-        });
+    } else {
+        // Browser doesn't support enumerateDevices
+        inputDeviceSelect.innerHTML = '<option value="default">Default Microphone</option>';
+        outputDeviceSelect.innerHTML = '<option value="default">Default Speaker</option>';
+        addLogEntry('Your browser does not support device enumeration', 'warning');
+    }
 }
 
 // Set up event listeners
@@ -90,7 +233,20 @@ function setupEventListeners() {
     
     // Microphone toggle
     micToggle.addEventListener('change', () => {
-        // This will be handled by the voice agent
+        if (micToggle.checked) {
+            // Request microphone access and start capturing
+            requestUserMicrophone()
+                .then(() => {
+                    startAudioCapture();
+                })
+                .catch(() => {
+                    micToggle.checked = false;
+                });
+        } else {
+            // Stop capturing audio
+            stopAudioCapture();
+        }
+        
         addLogEntry(`Microphone ${micToggle.checked ? 'enabled' : 'disabled'}`);
     });
     
@@ -142,6 +298,17 @@ function setupSocketListeners() {
 
 // Start the voice agent
 function startVoiceAgent() {
+    // If microphone is enabled, request access
+    if (micToggle.checked && !userAudioStream) {
+        requestUserMicrophone()
+            .then(() => {
+                startAudioCapture();
+            })
+            .catch(() => {
+                micToggle.checked = false;
+            });
+    }
+    
     const inputDeviceId = inputDeviceSelect.value;
     const outputDeviceId = outputDeviceSelect.value;
     
@@ -153,7 +320,6 @@ function startVoiceAgent() {
     isAgentRunning = true;
     startButton.disabled = true;
     stopButton.disabled = false;
-    micToggle.checked = true;
     
     addLogEntry('Voice agent started');
 }
@@ -161,6 +327,9 @@ function startVoiceAgent() {
 // Stop the voice agent
 function stopVoiceAgent() {
     socket.emit('stop_voice_agent');
+    
+    // Stop audio capture
+    stopAudioCapture();
     
     isAgentRunning = false;
     isAgentSpeaking = false;
@@ -351,7 +520,7 @@ function updateAppointmentDetails(data) {
         </div>
     `;
     
-    addLogEntry(`Appointment scheduled for ${customer.name} on ${formattedTime}`);
+    addLogEntry(`Appointment scheduled for ${customer.name} on ${formattedTime}`, 'success');
 }
 
 // Add a log entry
@@ -385,6 +554,17 @@ function base64ToArrayBuffer(base64) {
         bytes[i] = binaryString.charCodeAt(i);
     }
     return bytes.buffer;
+}
+
+// Convert ArrayBuffer to base64
+function arrayBufferToBase64(buffer) {
+    let binary = '';
+    const bytes = new Uint8Array(buffer);
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i++) {
+        binary += String.fromCharCode(bytes[i]);
+    }
+    return window.btoa(binary);
 }
 
 // Play audio chunk
