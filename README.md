@@ -93,6 +93,58 @@ This repository contains a voice agent application that collects customer detail
    heroku domains:add www.yourdomain.com
    ```
 
+## Troubleshooting
+
+### PyAudio Issues
+
+If you encounter issues with PyAudio on Heroku (such as "portaudio.h: No such file or directory"), try the following:
+
+1. **Verify buildpacks are in the correct order**:
+   ```
+   heroku buildpacks
+   ```
+   The apt buildpack should be first, followed by the Python buildpack.
+
+2. **Check the apt-packages file**:
+   Make sure it contains all the necessary dependencies:
+   ```
+   portaudio19-dev
+   python-all-dev
+   python3-all-dev
+   libasound-dev
+   libportaudio2
+   libportaudiocpp0
+   ffmpeg
+   libav-tools
+   ```
+
+3. **Use the pre-built wheel**:
+   The requirements.txt in this branch already uses a pre-built wheel for PyAudio, which should avoid compilation issues.
+
+4. **Fallback mechanism**:
+   The application includes a fallback mechanism that will still work even if PyAudio is not available, though with limited audio functionality.
+
+5. **Check build logs**:
+   ```
+   heroku logs --source app --dyno build
+   ```
+
+### WebSocket Connection Issues
+
+If WebSocket connections are failing:
+
+1. Ensure you're using the correct protocol (wss:// for HTTPS, ws:// for HTTP).
+2. Check if your browser supports WebSockets.
+3. Verify that no firewall or proxy is blocking WebSocket connections.
+
+### Google Calendar Authentication
+
+If you're having issues with Google Calendar authentication:
+
+1. Try using the mock calendar option first (`USE_MOCK_CALENDAR=true`).
+2. Verify your Google Calendar API credentials are correct.
+3. Check the application logs for authentication errors.
+
 ## Local Development
 
 To run the application locally:
@@ -114,17 +166,6 @@ To run the application locally:
    ```
 
 4. Open your browser to http://127.0.0.1:5000
-
-## Troubleshooting
-
-1. **PyAudio Issues**: If you encounter issues with PyAudio on Heroku, check the buildpack logs:
-   ```
-   heroku logs --source app --dyno build
-   ```
-
-2. **WebSocket Connection Issues**: If WebSocket connections are failing, ensure you're using the correct protocol (wss:// for HTTPS, ws:// for HTTP).
-
-3. **Google Calendar Authentication**: If you're having issues with Google Calendar authentication, try using the mock calendar option first to ensure the rest of the application is working.
 
 ## Project Structure
 
