@@ -97,7 +97,9 @@ This repository contains a voice agent application that collects customer detail
 
 ### PyAudio Issues
 
-If you encounter issues with PyAudio on Heroku (such as "portaudio.h: No such file or directory"), try the following:
+The application has been configured with a fallback mechanism for PyAudio, so it should work even if PyAudio is not available. The app will automatically detect if PyAudio is missing and will switch to text-only mode.
+
+If you want to try to get PyAudio working:
 
 1. **Verify buildpacks are in the correct order**:
    ```
@@ -118,13 +120,7 @@ If you encounter issues with PyAudio on Heroku (such as "portaudio.h: No such fi
    libav-tools
    ```
 
-3. **Use the pre-built wheel**:
-   The requirements.txt in this branch already uses a pre-built wheel for PyAudio, which should avoid compilation issues.
-
-4. **Fallback mechanism**:
-   The application includes a fallback mechanism that will still work even if PyAudio is not available, though with limited audio functionality.
-
-5. **Check build logs**:
+3. **Check build logs**:
    ```
    heroku logs --source app --dyno build
    ```
@@ -171,7 +167,7 @@ To run the application locally:
 
 - `app.py` - Flask web application with SocketIO for real-time communication
 - `Procfile` - Heroku process file that specifies how to run the application
-- `runtime.txt` - Specifies the Python version for Heroku
+- `.python-version` - Specifies the Python version for Heroku
 - `apt-packages` - Lists system dependencies required by PyAudio
 - `requirements.txt` - Python dependencies
 - `templates/` - HTML templates for the web interface
