@@ -22,6 +22,10 @@ from dotenv import load_dotenv
 import sys
 import websockets
 import traceback
+import eventlet
+
+# Patch for eventlet with asyncio
+eventlet.monkey_patch()
 
 # Load environment variables from .env file
 load_dotenv()
@@ -35,8 +39,8 @@ logger = logging.getLogger(__name__)
 
 # Flask app setup
 app = Flask(__name__, static_folder="./static", static_url_path="/")
-app.secret_key = secrets.token_hex(16)
-socketio = SocketIO(app, cors_allowed_origins="*")
+app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(16))
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 # Google Calendar API scopes
 SCOPES = ['https://www.googleapis.com/auth/calendar']
@@ -51,8 +55,9 @@ USER_AUDIO_SAMPLES_PER_CHUNK = round(USER_AUDIO_SAMPLE_RATE * USER_AUDIO_SECS_PE
 
 AGENT_AUDIO_SAMPLE_RATE = 16000
 AGENT_AUDIO_BYTES_PER_SEC = 2 * AGENT_AUDIO_SAMPLE_RATE
-name="Aamruth"
-email='chatgptplus1999@gmail.com'
+name = os.environ.get("CUSTOMER_NAME", "Aamruth")
+email = os.environ.get("CUSTOMER_EMAIL", 'chatgptplus1999@gmail.com')
+
 # Template for the prompt that will be formatted with current date
 PROMPT_TEMPLATE = """You are a friendly and professional real estate appointment scheduler for Premium Properties. Your role is to assist potential buyers in scheduling property viewings in Google Calendar.
 
@@ -255,31 +260,53 @@ class GoogleCalendarScheduler:
         self.credentials_file = credentials_file
         self.token_file = token_file
         self.service = None
+        
+        # For Heroku, try to use environment variables for credentials
+        self.use_env_credentials = os.environ.get("USE_ENV_CREDENTIALS", "false").lower() == "true"
     
     def authenticate(self):
         """Authenticate with Google Calendar API"""
         try:
             logger.info(f"Authenticating with Google Calendar API")
-            logger.info(f"Credentials file: {self.credentials_file}, exists: {os.path.exists(self.credentials_file)}")
-            logger.info(f"Token file: {self.token_file}, exists: {os.path.exists(self.token_file)}")
             
             creds = None
             
-            # Load existing token if available
-            if os.path.exists(self.token_file):
-                logger.info("Loading existing token")
-                with open(self.token_file, 'rb') as token:
-                    creds = pickle.load(token)
-                logger.info(f"Token loaded, expired: {creds.expired if creds else 'N/A'}")
+            # Try to use environment variables for credentials if configured
+            if self.use_env_credentials:
+                logger.info("Using environment variables for credentials")
+                creds_info = os.environ.get("GOOGLE_CREDENTIALS")
+                if creds_info:
+                    import json
+                    creds_dict = json.loads(creds_info)
+                    creds = Credentials.from_authorized_user_info(creds_dict, SCOPES)
+                    logger.info(f"Credentials loaded from environment, expired: {creds.expired if creds else 'N/A'}")
+            else:
+                # Load existing token if available
+                if os.path.exists(self.token_file):
+                    logger.info("Loading existing token")
+                    with open(self.token_file, 'rb') as token:
+                        creds = pickle.load(token)
+                    logger.info(f"Token loaded, expired: {creds.expired if creds else 'N/A'}")
             
             # Refresh token if expired
             if creds and creds.expired and creds.refresh_token:
                 logger.info("Refreshing expired token")
                 creds.refresh(Request())
                 logger.info("Token refreshed")
+                
+                # Save refreshed token if not using environment variables
+                if not self.use_env_credentials:
+                    with open(self.token_file, 'wb') as token:
+                        pickle.dump(creds, token)
+                    logger.info("Refreshed token saved")
             # Otherwise, get new credentials
             elif not creds:
                 logger.info("No token found, getting new credentials")
+                
+                if self.use_env_credentials:
+                    logger.error("No credentials in environment variables")
+                    return False
+                
                 if not os.path.exists(self.credentials_file):
                     logger.error(f"Credentials file not found: {self.credentials_file}")
                     return False
@@ -995,6 +1022,14 @@ def run_async_voice_agent():
 def index():
     return render_template("index.html")
 
+@app.route("/health")
+def health_check():
+    """Health check endpoint for Heroku"""
+    return jsonify({
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "version": "1.0.0"
+    })
 
 @app.route("/api/devices", methods=["GET"])
 def get_audio_devices():
@@ -1079,6 +1114,9 @@ def handle_send_text(data):
 
 
 if __name__ == "__main__":
+    # Get port from environment variable (Heroku sets this automatically)
+    port = int(os.environ.get("PORT", 5000))
+    
     # Print Python version for debugging
     print(f"Python version: {sys.version}")
     
@@ -1094,17 +1132,23 @@ if __name__ == "__main__":
         print(f"Using Deepgram API key: {os.environ.get('DEEPGRAM_API_KEY')[:5]}...")
         print("=" * 60 + "\n")
     
-    # Check if credentials.json exists
-    if not os.path.exists('credentials.json'):
+    # Check if using environment variables for Google credentials
+    if os.environ.get("USE_ENV_CREDENTIALS", "false").lower() == "true":
         print("\n" + "=" * 60)
-        print("⚠️  WARNING: credentials.json file not found!")
-        print("Google Calendar integration will not work without this file.")
-        print("Please make sure the file exists in the project directory.")
+        print("Using environment variables for Google Calendar credentials")
         print("=" * 60 + "\n")
     else:
-        print("\n" + "=" * 60)
-        print(f"Found credentials.json file")
-        print("=" * 60 + "\n")
+        # Check if credentials.json exists
+        if not os.path.exists('credentials.json'):
+            print("\n" + "=" * 60)
+            print("⚠️  WARNING: credentials.json file not found!")
+            print("Google Calendar integration will not work without this file.")
+            print("Please make sure the file exists in the project directory.")
+            print("=" * 60 + "\n")
+        else:
+            print("\n" + "=" * 60)
+            print(f"Found credentials.json file")
+            print("=" * 60 + "\n")
     
     # Check if using mock calendar
     if os.environ.get("USE_MOCK_CALENDAR", "false").lower() == "true":
@@ -1115,11 +1159,9 @@ if __name__ == "__main__":
     print("\n" + "=" * 60)
     print("🚀 Voice Agent Calendar Scheduler Starting!")
     print("=" * 60)
-    print("\n1. Open this link in your browser to start the demo:")
-    print("   http://127.0.0.1:5000")
-    print("\n2. Click 'Start Voice Agent' when the page loads")
-    print("\n3. Speak with the agent using your microphone or type in the text box")
+    print(f"\nListening on port {port}")
     print("\nPress Ctrl+C to stop the server\n")
     print("=" * 60 + "\n")
 
-    socketio.run(app, debug=True)
+    # Use eventlet for production
+    socketio.run(app, host="0.0.0.0", port=port)
