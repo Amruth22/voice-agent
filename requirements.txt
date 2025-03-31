@@ -3,8 +3,9 @@ flask-socketio>=5.0.0
 google-api-python-client>=2.0.0
 google-auth-httplib2>=0.1.0
 google-auth-oauthlib>=0.4.0
-# Use a pre-built wheel for PyAudio instead of building from source
-https://files.pythonhosted.org/packages/b9/ed/8b4f8b1e2810c0b6ab3f9c368c2350ce1b0c7e0631e21e8e681e12c2c079/PyAudio-0.2.13-cp39-cp39-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+# Use a fallback approach for PyAudio
+# The app has a fallback mechanism if PyAudio fails to install
+pyaudio>=0.2.11; platform_system != "Linux"
 websockets==10.4
 janus>=1.0.0
 python-socketio>=5.0.0
