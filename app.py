@@ -527,11 +527,18 @@ customer_data_store = {}
 # Voice Agent class
 class VoiceAgent:
     def __init__(self):
+    # Try to get the current event loop or create a new one
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
         self.mic_audio_queue = asyncio.Queue()
         self.speaker = None
         self.ws = None
         self.is_running = False
-        self.loop = None
+        self.loop = loop  # Store the loop
         self.audio = None
         self.stream = None
         self.input_device_id = None
@@ -939,12 +946,19 @@ voice_agent = None
 
 def run_async_voice_agent():
     try:
+        global voice_agent
+        
         # Create a new event loop for this thread
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
+        # Create a new VoiceAgent instance with the loop if needed
+        if voice_agent is None:
+            voice_agent = VoiceAgent()
+        
         # Set the loop in the voice agent
-        voice_agent.set_loop(loop)
+        voice_agent.loop = loop
+        voice_agent.mic_audio_queue = asyncio.Queue()  # Create a new queue with the new loop
 
         try:
             # Run the voice agent
